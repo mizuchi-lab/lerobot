@@ -303,7 +303,10 @@ def make_policy(
 
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     if not cfg.input_features:
-        cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+        excluded = set(getattr(cfg, "exclude_input_features", None) or ())
+        cfg.input_features = {
+            key: ft for key, ft in features.items() if key not in cfg.output_features and key not in excluded
+        }
 
     # Store action feature names for relative_exclude_joints support
     if ds_meta is not None and hasattr(cfg, "action_feature_names"):

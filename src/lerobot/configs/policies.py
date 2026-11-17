@@ -58,6 +58,9 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # `input_features` can be set to None/null in order to infer those values from the dataset.
     input_features: dict[str, PolicyFeature] | None = field(default_factory=dict)
     output_features: dict[str, PolicyFeature] | None = field(default_factory=dict)
+    # Dataset features left out when `input_features` is inferred from the dataset, e.g. a recorded depth camera
+    # that should not be a policy input. Keys absent from the dataset are ignored.
+    exclude_input_features: list[str] = field(default_factory=list)
 
     device: str | None = None  # e.g. "cuda", "cuda:0", "cpu", or "mps"
     # `use_amp` determines whether to use Automatic Mixed Precision (AMP) for training and evaluation. With AMP,
