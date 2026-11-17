@@ -42,7 +42,7 @@ pip install -e '.[unitree_g1]'
 
 ### Test the Installation (Simulation)
 
-The simulation environment has its own dependencies. Check the Simulation environment dependencies: [Unitree G1 Mujoco EnvHub](https://huggingface.co/k-valentin/unitree-g1-mujoco/tree/main).
+The simulation environment has its own dependencies. Check the Simulation environment dependencies: [Unitree G1 Mujoco EnvHub](https://huggingface.co/mizuchi-lab/unitree-g1-mujoco/tree/main).
 
 ```bash
 pip install mujoco loguru msgpack msgpack-numpy
@@ -59,7 +59,7 @@ lerobot-teleoperate \
   --robot.controller=GrootLocomotionController
 ```
 
-This will launch a [MuJoCo sim instance](https://huggingface.co/k-valentin/unitree-g1-mujoco/tree/main) for the G1. You can connect a gamepad to your machine before launching in order to control the robot's locomotion in sim. We support both [HolosomaLocomotionController](https://github.com/amazon-far/holosoma) and [GrootLocomotionController](https://github.com/NVlabs/GR00T-WholeBodyControl) via `--robot.controller`.
+This will launch a [MuJoCo sim instance](https://huggingface.co/mizuchi-lab/unitree-g1-mujoco/tree/main) for the G1. You can connect a gamepad to your machine before launching in order to control the robot's locomotion in sim. We support both [HolosomaLocomotionController](https://github.com/amazon-far/holosoma) and [GrootLocomotionController](https://github.com/NVlabs/GR00T-WholeBodyControl) via `--robot.controller`.
 
 - Press `9` to release the robot
 - Press `7` / `8` to increase / decrease waist height
@@ -404,6 +404,13 @@ python src/lerobot/robots/unitree_g1/run_g1_server.py \
   default `/dev/ttyACM0`). `--no-head` / `--no-hands` leave one bus out, for a head without
   AmazingHands or AmazingHands without the head. `--no-handshake` skips the bus handshake for
   firmware that doesn't answer it; `--headhand-rate` sets the state rate (default 50 Hz).
+- `--locomotion unitree` keeps Unitree's own locomotion on the legs instead of taking low-level control
+  (see [Unitree's own locomotion](#unitrees-own-locomotion)); `--max-velocity VX VY WZ` caps the walk command
+  (default 0.6 0.4 0.8).
+- `--camera-depth` (RealSense only) also streams the depth map, aligned to the color image and lossless
+  (uint16 mm). A ZMQ camera with `"use_depth": true` records it as `observation.images.<camera>_depth`;
+  `--policy.exclude_input_features='["observation.images.<camera>_depth"]'` keeps it out of a policy's inputs.
+- The camera server runs in its own process, so a slow frame never stalls the relay.
 - On startup the server prints `mode_machine=<n>`; check it against `--robot.revision`.
 
 ### AmazingHand + pan/tilt D455 setup (Jetson)
@@ -532,14 +539,14 @@ globally on X11.
 
 `unitree_g1_xr` drives the arms from the controllers' (or tracked hands') wrist poses, the pan/tilt head
 from the headset and the hands from the triggers. It is a thin adapter over our
-[xr_teleoperate fork](https://github.com/MrKeith99/xr_teleoperate)'s `xr_teleoperate.core`, whose arm IK
+[xr_teleoperate fork](https://github.com/mizuchi-lab/xr_teleoperate)'s `xr_teleoperate.core`, whose arm IK
 is built from the sim's composed model of the same embodiment, so it covers every body and end effector.
 Give it the robot's four embodiment fields; it refuses a robot of another embodiment.
 
 ```bash
 pip install -e ".[unitree_g1_xr]"
 # televuer pins numpy<2, so install it without its dependencies from the fork's checkout
-git clone --recurse-submodules https://github.com/MrKeith99/xr_teleoperate
+git clone --recurse-submodules https://github.com/mizuchi-lab/xr_teleoperate
 pip install -e xr_teleoperate/teleop/televuer --no-deps
 # The headset needs HTTPS: a self-signed certificate where televuer looks for it
 mkdir -p ~/.config/xr_teleoperate && cd ~/.config/xr_teleoperate && \
@@ -579,12 +586,46 @@ then hold both grips for 1 s while disengaged to start GR00T; do it again to sto
 current pose). A start requested during the ramp is refused. `--robot.locomotion_start_gate=false` restores
 starting the controller at connect. Episodes start only once locomotion runs and the teleop is engaged.
 
+`--robot.standby_on_exit=true` keeps the locomotion policy running with zero velocity when the session ends
+(recording finished or the first Ctrl-C), so the robot stays up; a second Ctrl-C, a fault or the remote
+e-stop (L2+B) ends in damping. It needs a controller and excludes `--robot.handover_on_exit`.
+
+#### Unitree's own locomotion
+
+`--robot.controller=UnitreeLocomotion` (real robot only) leaves the legs to Unitree's built-in controller.
+Start the server with `--locomotion unitree` and bring the robot into Regular mode with the remote
+(L2+Up to stand, then R1+X). The server then:
+
+- forwards the client's waist and arm targets through `rt/arm_sdk`, blending in over 1 s and out over 2 s;
+- sends the client's `kNavVx/Vy/YawRate.cmd` to Unitree's locomotion (`LocoClient.SetVelocity`), zero when
+  the client stops sending for 0.3 s;
+- accepts clients only in Regular mode (loco FSM 500 / 501) and stops the session if the robot leaves it.
+  Running mode (R2+A) does not take arm commands.
+
+Session end, Ctrl-C, the watchdog and L2+B all hand the upper body back to Unitree and the robot keeps
+standing (L2+B is also Unitree's damping). There is no both-grips gesture in this mode: press A to engage,
+the sticks walk only while engaged.
+
+```bash
+# on the robot
+python src/lerobot/robots/unitree_g1/run_g1_server.py --locomotion unitree \
+  --headhand --camera --camera-type intelrealsense --camera-serial <D455_SERIAL>
+# on the workstation
+lerobot-teleoperate --robot.type=unitree_g1 --robot.body=23dof --robot.end_effector=amazing_hand \
+  --robot.head_mount=pan_tilt --robot.head_sensor=d455 --robot.controller=UnitreeLocomotion \
+  --teleop.type=unitree_g1_xr --teleop.body=23dof --teleop.end_effector=amazing_hand \
+  --teleop.head_mount=pan_tilt --teleop.head_sensor=d455
+```
+
 In sim, at the end of each episode the XR teleoperator disengages and resets the sim: the robot is back
 on the band at its start pose. Release the band with both grips, then press A, and the next episode
 starts. With this and the operator gate, `--dataset.reset_time_s=0` is recommended for XR sim recording.
 `--teleop.reset_sim_on_episode_end=false` disables the automatic reset.
 
-Nothing moves until A; the arms then move to your pose at `--teleop.engage_arm_speed_rad_s` (0.5) before following at full speed, and targets hold while tracking is lost. `--teleop.input_mode=hand` uses hand
+On hardware an episode end (also the time-out) disengages the teleop too, so the next episode needs A
+again (`--teleop.disengage_on_episode_end=false` keeps it engaged).
+
+Nothing moves until A; the arms then move to your pose at `--teleop.engage_arm_speed_rad_s` (0.5) before following at full speed, and targets hold while tracking is lost. With `lerobot-record` that approach is not recorded: the episode starts once the arms have caught up. `--teleop.input_mode=hand` uses hand
 tracking (pinch closes the hand; it engages when tracking starts).
 
 By default the headset shows pass-through (the room). `--teleop.display_mode=ego` shows the robot's head
@@ -604,7 +645,7 @@ lerobot-teleoperate \
 
 ### Simulation
 
-[`k-valentin/unitree-g1-mujoco`](https://huggingface.co/k-valentin/unitree-g1-mujoco), the default
+[`mizuchi-lab/unitree-g1-mujoco`](https://huggingface.co/mizuchi-lab/unitree-g1-mujoco), the default
 `--robot.sim_env_repo_id`, composes every combination at load time; the robot passes its embodiment
 to it as `UNITREE_G1_MUJOCO_BODY` / `_END_EFFECTOR` / `_HEAD_MOUNT` / `_HEAD_SENSOR`. On the 23dof body a hand sits where it
 would on a 29dof arm with its wrist pitch/yaw at zero; the Dex and AmazingHand mounts on the other
