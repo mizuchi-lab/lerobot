@@ -138,6 +138,8 @@ class RealSenseCamera(Camera):
         self.color_mode = config.color_mode
         self.use_rgb = config.use_rgb
         self.use_depth = config.use_depth
+        self.align_depth = config.align_depth
+        self._align = None  # rs.align onto the color stream, created when the pipeline opens
         self.warmup_s = config.warmup_s
         self.exposure: int | None = config.exposure
         self.gain: int | None = config.gain
@@ -211,6 +213,7 @@ class RealSenseCamera(Camera):
 
         self.rs_pipeline = rs_pipeline
         self.rs_profile = rs_profile
+        self._align = rs.align(rs.stream.color) if self.align_depth else None
 
         try:
             self._configure_capture_settings()
@@ -579,6 +582,8 @@ class RealSenseCamera(Camera):
         if not ret or frame is None:
             raise RuntimeError(f"{self} read failed (status={ret}).")
 
+        if self._align is not None:
+            frame = self._align.process(frame)
         return frame
 
     @check_if_not_connected

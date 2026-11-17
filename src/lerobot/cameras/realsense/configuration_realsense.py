@@ -44,6 +44,8 @@ class RealSenseCameraConfig(CameraConfig):
         color_mode: Color mode for image output (RGB or BGR). Defaults to RGB.
         use_rgb: Whether to enable the color stream. Defaults to True.
         use_depth: Whether to enable depth stream. Defaults to False.
+        align_depth: Reproject the depth stream onto the color stream (`rs.align`), so depth pixel (u, v) is
+            the color pixel (u, v), at the color resolution. Needs `use_rgb` and `use_depth`. Defaults to False.
         rotation: Image rotation setting (0°, 90°, 180°, or 270°). Defaults to no rotation.
         warmup_s: Time reading frames before returning from connect (in seconds)
         exposure: Manual exposure value for the color sensor. When set, auto-exposure is
@@ -70,6 +72,7 @@ class RealSenseCameraConfig(CameraConfig):
     color_mode: ColorMode = ColorMode.RGB
     use_rgb: bool = True
     use_depth: bool = False
+    align_depth: bool = False
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
     warmup_s: int = 1
     exposure: int | None = None
@@ -82,6 +85,8 @@ class RealSenseCameraConfig(CameraConfig):
 
         if not self.use_rgb and not self.use_depth:
             raise ValueError("At least one of `use_rgb` or `use_depth` must be enabled.")
+        if self.align_depth and not (self.use_rgb and self.use_depth):
+            raise ValueError("`align_depth` needs both `use_rgb` and `use_depth`.")
 
         manual_color_options = {
             "exposure": self.exposure,

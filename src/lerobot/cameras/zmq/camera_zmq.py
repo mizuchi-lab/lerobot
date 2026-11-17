@@ -27,6 +27,7 @@ import base64
 import json
 import logging
 import time
+import zlib
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,7 @@ from lerobot.utils.errors import DeviceNotConnectedError
 from ..camera import Camera
 from ..configs import ColorMode
 from .configuration_zmq import ZMQCameraConfig
+from .depth_codec import decode_depth
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,7 @@ class ZMQCamera(Camera):
         self.camera_name = config.camera_name
         self.color_mode = config.color_mode
         self.timeout_ms = config.timeout_ms
+        self.use_depth = config.use_depth
 
         # ZMQ Context and Socket
         self.context: zmq.Context | None = None
@@ -101,6 +104,7 @@ class ZMQCamera(Camera):
         self.stop_event: Event | None = None
         self.frame_lock: Lock = Lock()
         self.latest_frame: NDArray[Any] | None = None
+        self.latest_depth_frame: NDArray[Any] | None = None
         self.latest_timestamp: float | None = None
         self.new_frame_event: Event = Event()
 
@@ -180,6 +184,11 @@ class ZMQCamera(Camera):
         """
         Reads a single frame directly from the ZMQ socket.
         """
+        return self._read_rgbd_from_hardware()[0]
+
+    def _read_rgbd_from_hardware(self) -> tuple[NDArray[Any], NDArray[Any] | None]:
+        """Reads one message: the color frame and, with `use_depth`, its depth map (uint16 mm, (H, W, 1)) from
+        the same frameset; None when the message carries no depth for this camera."""
         if not self.is_connected or self.socket is None:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
@@ -197,7 +206,8 @@ class ZMQCamera(Camera):
             images = data["images"]
 
         # Get image by camera name or first available
-        img_b64 = images.get(self.camera_name) or next(iter(images.values()))
+        name = self.camera_name if self.camera_name in images else next(iter(images))
+        img_b64 = images[name]
 
         # Decode base64 JPEG
         img_bytes = base64.b64decode(img_b64)
@@ -206,7 +216,15 @@ class ZMQCamera(Camera):
         if frame is None:
             raise RuntimeError(f"{self} failed to decode image")
 
-        return frame
+        depth = None
+        depth_b64 = data.get("depths", {}).get(name) if self.use_depth else None
+        if depth_b64 is not None:
+            try:
+                depth = decode_depth(depth_b64)[..., np.newaxis]
+            except (ValueError, zlib.error) as e:
+                raise RuntimeError(f"{self} failed to decode the depth map: {e}") from e
+
+        return frame, depth
 
     @check_if_not_connected
     def read(self, color_mode: ColorMode | None = None) -> NDArray[Any]:
@@ -248,11 +266,15 @@ class ZMQCamera(Camera):
         failure_count = 0
         while not stop_event.is_set():
             try:
-                frame = self._read_from_hardware()
+                frame, depth = self._read_rgbd_from_hardware()
                 capture_time = time.perf_counter()
 
                 with self.frame_lock:
                     self.latest_frame = frame
+                    if depth is not None:
+                        self.latest_depth_frame = depth
+                    elif self.use_depth:
+                        self.latest_depth_frame = None  # never pair a color frame with an older depth
                     self.latest_timestamp = capture_time
                 self.new_frame_event.set()
                 failure_count = 0
@@ -274,6 +296,7 @@ class ZMQCamera(Camera):
 
         with self.frame_lock:
             self.latest_frame = None
+            self.latest_depth_frame = None
             self.latest_timestamp = None
             self.new_frame_event.clear()
 
@@ -296,6 +319,7 @@ class ZMQCamera(Camera):
 
         with self.frame_lock:
             self.latest_frame = None
+            self.latest_depth_frame = None
             self.latest_timestamp = None
             self.new_frame_event.clear()
 
@@ -367,6 +391,35 @@ class ZMQCamera(Camera):
 
         return frame
 
+    @check_if_not_connected
+    def read_latest_depth(self, max_age_ms: int = 1000) -> NDArray[Any]:
+        """Return the depth map (uint16 mm, (H, W, 1)) of the most recent frame (peeking), like `read_latest`.
+
+        Raises:
+            RuntimeError: Without `use_depth`, or if the latest message carried no depth (a server without
+                depth for this camera).
+            TimeoutError: If the latest frame is older than `max_age_ms`.
+        """
+        if not self.use_depth:
+            raise RuntimeError(f"{self}: cannot read depth — camera was configured with use_depth=False.")
+        if self.thread is None or not self.thread.is_alive():
+            raise RuntimeError(f"{self} read thread is not running.")
+
+        with self.frame_lock:
+            depth = self.latest_depth_frame
+            timestamp = self.latest_timestamp
+
+        if depth is None or timestamp is None:
+            raise RuntimeError(f"{self} has no depth map (does the image server send depth for this camera?)")
+
+        age_ms = (time.perf_counter() - timestamp) * 1e3
+        if age_ms > max_age_ms:
+            raise TimeoutError(
+                f"{self} latest frame is too old: {age_ms:.1f} ms (max allowed: {max_age_ms} ms)."
+            )
+
+        return depth
+
     def disconnect(self) -> None:
         """Disconnect from ZMQ camera."""
         if not self.is_connected and self.thread is None:
@@ -379,6 +432,7 @@ class ZMQCamera(Camera):
 
         with self.frame_lock:
             self.latest_frame = None
+            self.latest_depth_frame = None
             self.latest_timestamp = None
             self.new_frame_event.clear()
 

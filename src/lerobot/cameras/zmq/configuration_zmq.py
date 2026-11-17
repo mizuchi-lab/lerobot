@@ -30,6 +30,8 @@ class ZMQCameraConfig(CameraConfig):
     color_mode: ColorMode = ColorMode.RGB
     timeout_ms: int = 5000
     warmup_s: int = 1
+    # Also read the depth map the server sends for this camera (uint16 mm, lossless PNG; see `image_server.py`).
+    use_depth: bool = False
 
     def __post_init__(self) -> None:
         self.color_mode = ColorMode(self.color_mode)

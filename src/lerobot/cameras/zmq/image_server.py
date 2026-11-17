@@ -17,6 +17,8 @@
 """
 Streams camera images over ZMQ.
 Uses lerobot's OpenCVCamera for capture, encodes images to base64 and sends them over ZMQ.
+A RealSense camera with `use_depth` also sends its depth map (uint16 mm, lossless zlib) under "depths", taken from
+the same frameset as the color image.
 """
 
 import base64
@@ -35,6 +37,7 @@ from ..camera import Camera
 from ..configs import ColorMode
 from ..opencv import OpenCVCamera, OpenCVCameraConfig
 from ..realsense import RealSenseCamera, RealSenseCameraConfig
+from .depth_codec import encode_depth
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,8 @@ class CameraCaptureThread:
         self.camera = camera
         self.name = name
         self.latest_encoded: str | None = None  # Pre-encoded JPEG as base64
+        self.latest_depth: str | None = None  # Pre-encoded 16-bit PNG as base64 (depth cameras only)
+        self.use_depth = bool(getattr(camera, "use_depth", False))
         self.latest_timestamp: float = 0.0
         self.frame_lock = threading.Lock()
         self.running = False
@@ -74,11 +79,18 @@ class CameraCaptureThread:
         while self.running:
             try:
                 frame = self.camera.read()  # Blocks at camera's native rate
+                depth = None
+                if self.use_depth:
+                    # Color and depth of the same frameset (read() may return an older color than the depth)
+                    with self.camera.frame_lock:
+                        frame, depth = self.camera.latest_color_frame, self.camera.latest_depth_frame
                 timestamp = time.time()
                 # Encode immediately in capture thread (this is the slow part)
                 encoded = encode_image(frame)
+                encoded_depth = encode_depth(depth) if depth is not None else None
                 with self.frame_lock:
                     self.latest_encoded = encoded
+                    self.latest_depth = encoded_depth
                     self.latest_timestamp = timestamp
             except Exception as e:
                 logger.warning(f"Camera {self.name} capture error: {e}")
@@ -88,6 +100,11 @@ class CameraCaptureThread:
         """Get the latest encoded frame and its timestamp."""
         with self.frame_lock:
             return self.latest_encoded, self.latest_timestamp
+
+    def get_latest_rgbd(self) -> tuple[str | None, str | None, float]:
+        """Get the latest encoded frame, its encoded depth (None without depth) and their timestamp."""
+        with self.frame_lock:
+            return self.latest_encoded, self.latest_depth, self.latest_timestamp
 
 
 class ImageServer:
@@ -109,8 +126,10 @@ class ImageServer:
                     height=shape[0],
                     color_mode=ColorMode.RGB,
                     use_rgb=True,
-                    use_depth=False,
-                    warmup_s=cfg.get("warmup_s", 1),
+                    use_depth=bool(cfg.get("use_depth", False)),
+                    align_depth=bool(cfg.get("align_depth", False)),
+                    # the D455 depth stream needs more than 1 s for its first frame (seen 2026-11-17)
+                    warmup_s=cfg.get("warmup_s", 5 if cfg.get("use_depth") else 1),
                     exposure=cfg.get("exposure"),
                     gain=cfg.get("gain"),
                     white_balance=cfg.get("white_balance"),
@@ -128,7 +147,12 @@ class ImageServer:
                 camera = OpenCVCamera(cam_config)
             camera.connect()
             self.cameras[name] = camera
-            logger.info(f"Camera {name}: {shape[1]}x{shape[0]}")
+            depth_note = ""
+            if getattr(camera, "use_depth", False):
+                depth_note = " + depth" + (
+                    " (aligned to color)" if getattr(camera, "align_depth", False) else ""
+                )
+            logger.info(f"Camera {name}: {shape[1]}x{shape[0]}{depth_note}")
 
             # Create capture thread for this camera
             capture_thread = CameraCaptureThread(camera, name)
@@ -166,10 +190,12 @@ class ImageServer:
                 # Build message
                 message = {"timestamps": {}, "images": {}}
                 for name, capture_thread in self.capture_threads.items():
-                    encoded, timestamp = capture_thread.get_latest()
+                    encoded, encoded_depth, timestamp = capture_thread.get_latest_rgbd()
                     if encoded is not None and timestamp > last_published_ts.get(name, 0.0):
                         message["timestamps"][name] = timestamp
                         message["images"][name] = encoded
+                        if encoded_depth is not None:
+                            message.setdefault("depths", {})[name] = encoded_depth
                         last_published_ts[name] = timestamp
 
                 # Send as JSON string (suppress if buffer full)
