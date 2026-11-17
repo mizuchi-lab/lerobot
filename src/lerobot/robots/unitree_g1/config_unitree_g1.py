@@ -115,6 +115,10 @@ class UnitreeG1Config(RobotConfig):
     # or `select-mode`) to give the robot back to Unitree's locomotion controller instead of damping. If the
     # relay does not confirm within `handover_timeout_s`, the legs keep holding until Ctrl-C, which damps.
     handover_on_exit: bool = False
+    # Real robot with a locomotion controller only: on exit (end of teleop / recording, Ctrl-C), if the policy is
+    # running, keep it balancing in place (zero velocity, arms at their last targets) instead of damping. The
+    # standby ends in damping on Ctrl-C, the remote e-stop (L2+B on the relay) or a lost robot state.
+    standby_on_exit: bool = False
     # Real robot only: refuse to connect unless the relay reports it holds the robot in damping (no other
     # client, not handed over, a relay with the damping watchdog).
     require_damping_at_connect: bool = True
@@ -219,6 +223,19 @@ class UnitreeG1Config(RobotConfig):
             raise ValueError(f"sim_start_randomize must be >= 0, got {self.sim_start_randomize}")
         if self.handover_timeout_s <= 0:
             raise ValueError(f"handover_timeout_s must be > 0, got {self.handover_timeout_s}")
+        if self.controller == "UnitreeLocomotion":
+            if self.is_simulation:
+                raise ValueError(
+                    "controller=UnitreeLocomotion is real-robot only (Unitree's controller runs on it)"
+                )
+            if self.handover_on_exit:
+                raise ValueError(
+                    "handover_on_exit does not apply to UnitreeLocomotion (Unitree keeps the robot)"
+                )
+        if self.standby_on_exit and self.handover_on_exit:
+            raise ValueError("standby_on_exit and handover_on_exit are exclusive: pick one exit behaviour")
+        if self.standby_on_exit and self.controller is None:
+            raise ValueError("standby_on_exit needs a locomotion controller (e.g. GrootLocomotionController)")
         if self.lowstate_timeout_s <= 0:
             raise ValueError(f"lowstate_timeout_s must be > 0, got {self.lowstate_timeout_s}")
         if self.stand_ramp_s <= 0:

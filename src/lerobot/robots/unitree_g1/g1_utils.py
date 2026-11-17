@@ -106,6 +106,8 @@ def make_locomotion_controller(name: str | None):
     controllers = {
         "GrootLocomotionController": "lerobot.robots.unitree_g1.gr00t_locomotion",
         "HolosomaLocomotionController": "lerobot.robots.unitree_g1.holosoma_locomotion",
+        # Unitree's own locomotion on the robot (relay `--locomotion unitree`); no policy runs here
+        "UnitreeLocomotion": "lerobot.robots.unitree_g1.unitree_locomotion",
     }
     module_path = controllers.get(name)
     if module_path is None:

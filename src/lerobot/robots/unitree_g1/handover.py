@@ -103,13 +103,15 @@ class Handover:
         print(f"handover: {self.state.value}" + (f" ({error})" if error else ""))
 
 
-def relay_state(forwarding: bool, handover: Handover) -> str:
-    """What the relay does with the robot, reported in every lowstate as `relay_state`."""
+def relay_state(forwarding: bool, handover: Handover, idle: str = "damping") -> str:
+    """What the relay does with the robot, reported in every lowstate as `relay_state`. `idle` is the state
+    without a forwarding client: "damping" (low-level relay) or "unitree" (`--locomotion unitree`: Unitree's
+    controller has the whole robot)."""
     if handover.state == HandoverState.DONE:
         return "handed_over"
     if handover.active:
         return "handover"
-    return "forwarding" if forwarding else "damping"
+    return "forwarding" if forwarding else idle
 
 
 def check_damping(fsm_id: int | None, assume_damping: bool) -> str | None:

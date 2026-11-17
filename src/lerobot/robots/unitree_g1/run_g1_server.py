@@ -19,7 +19,8 @@ DDS-to-ZMQ bridge server for Unitree G1 robot.
 
 This server runs on the robot and forwards:
 - Robot state (LowState) from DDS to ZMQ (for remote clients)
-- Robot commands (LowCmd) from ZMQ to DDS (from remote clients)
+- Robot commands (LowCmd) from ZMQ to DDS (from remote clients); with `--locomotion unitree`, Unitree's
+  locomotion keeps the legs and only the waist/arm part goes to `rt/arm_sdk` (see `unitree_loco_relay.py`)
 - Optionally, the Dex3 hand / Dex1 gripper command and state topics (`--hands`)
 - Optionally, the pan/tilt head and AmazingHand servos over their own ZMQ bridge (`--headhand`)
 - Optionally, a head camera stream (`--camera`)
@@ -36,6 +37,7 @@ import multiprocessing
 import signal
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import zmq
@@ -80,6 +82,13 @@ from lerobot.robots.unitree_g1.safety import (
     remote_key_mask,
     remote_keys,
 )
+from lerobot.robots.unitree_g1.unitree_loco_relay import (
+    DEFAULT_MAX_VELOCITY,
+    ArmSdkForwarder,
+    NavForwarder,
+    WalkMonitor,
+    check_walking,
+)
 from lerobot.robots.unitree_g1.unitree_sdk2_socket import (
     LOWCMD_PORT,
     LOWSTATE_PORT,
@@ -89,6 +98,8 @@ from lerobot.robots.unitree_g1.unitree_sdk2_socket import (
 )
 
 NUM_MOTORS = 35
+ARM_SDK_TOPIC = "rt/arm_sdk"
+LOCOMOTION_MODES = ("lowlevel", "unitree")
 
 
 def lowstate_to_dict(msg: hg_LowState) -> dict[str, Any]:
@@ -146,9 +157,12 @@ def state_forward_loop(
     handover: Handover | None = None,
     watchdog: LowCmdWatchdog | None = None,
     estop_mask: int = 0,
+    idle_state: str | Callable[[], str] = "damping",
+    on_estop: Callable[[], None] | None = None,
 ) -> None:
     """Read observation from DDS and forward to ZMQ clients (with the relay's handover state). Every lowstate
-    with all `estop_mask` remote keys held latches damping for the active client (remote e-stop)."""
+    with all `estop_mask` remote keys held latches damping for the active client (remote e-stop); in Unitree
+    mode (`idle_state="unitree"`) it hands the upper body back to Unitree instead (`on_estop`)."""
     last_state_time = 0.0
 
     while not shutdown_event.is_set():
@@ -164,7 +178,10 @@ def state_forward_loop(
         ):
             session = watchdog.estop()
             if session is not None:
-                print(f"remote e-stop: DAMPING session {session} (restart the client to resume)", flush=True)
+                if on_estop is not None:
+                    on_estop()
+                stop = "upper body back to Unitree" if on_estop is not None else "DAMPING"
+                print(f"remote e-stop: {stop}, session {session} (restart the client to resume)", flush=True)
 
         now = time.time()
         # optional downsampling (if robot dds rate > state_period)
@@ -174,7 +191,9 @@ def state_forward_loop(
             if handover is not None:
                 state_dict["relay_handover"] = handover.state.value
                 state_dict["relay_state"] = relay_state(
-                    watchdog is not None and watchdog.forwarding, handover
+                    watchdog is not None and watchdog.forwarding,
+                    handover,
+                    idle_state() if callable(idle_state) else idle_state,
                 )
             payload = json.dumps({"topic": kTopicLowState, "data": state_dict}).encode("utf-8")
             # if no subscribers / tx buffer full, just drop
@@ -287,6 +306,68 @@ def cmd_forward_loop(
                 last_damping_t = now
 
 
+def arm_sdk_forward_loop(
+    lowcmd_sock: zmq.Socket,
+    arms: ArmSdkForwarder,
+    nav: NavForwarder,
+    watchdog: LowCmdWatchdog,
+    shutdown_event: threading.Event | None = None,
+    period: float = 0.02,
+    accept: Callable[[], bool] | None = None,
+) -> None:
+    """Unitree mode: forward the active client's waist/arm commands to `rt/arm_sdk` (through `arms`, which ramps
+    the blend weight) and its walk command to `nav`. When the client stops, the watchdog trips and `arms` hands
+    the upper body back to Unitree; the legs never leave Unitree's controller."""
+    poller = zmq.Poller()
+    poller.register(lowcmd_sock, zmq.POLLIN)
+    rejected_session: str | None = None
+    print("lowcmd watchdog: Unitree's controller has the robot until a client connects")
+    while shutdown_event is None or not shutdown_event.is_set():
+        try:
+            ready = dict(poller.poll(timeout=int(period * 1000)))
+        except zmq.ContextTerminated:
+            break
+        now = time.monotonic()
+        if lowcmd_sock in ready:
+            try:
+                payload = lowcmd_sock.recv(zmq.NOBLOCK)
+            except zmq.Again:
+                payload = None
+            except zmq.ContextTerminated:
+                break
+            if payload is not None:
+                msg_dict = json.loads(payload.decode("utf-8"))
+                session = msg_dict.get("session")
+                if msg_dict.get("topic", "") == kTopicLowCommand_Debug:
+                    was_forwarding = watchdog.forwarding
+                    if accept is not None and not accept():
+                        if session != rejected_session:
+                            rejected_session = session
+                            print(
+                                f"lowcmd watchdog: ignoring session {session}: Unitree is not in Regular mode"
+                            )
+                    elif watchdog.on_command(session, now):
+                        if not was_forwarding:
+                            print(f"lowcmd watchdog: forwarding client session {session} (upper body)")
+                        arms.on_client_cmd(msg_dict.get("data", {}))
+                        nav.update(msg_dict.get("nav"), now)
+                    elif session != rejected_session:
+                        rejected_session = session
+                        print(
+                            f"lowcmd watchdog: ignoring session {session} (timed out or not the active one)"
+                        )
+        was_forwarding = watchdog.forwarding
+        watchdog.check(now)
+        if was_forwarding and not watchdog.forwarding:
+            stale = watchdog.stale_s(now)
+            print(
+                f"lowcmd watchdog: session {watchdog.session} stopped"
+                + (f" (no lowcmd for {stale:.2f}s)" if stale is not None else "")
+                + ": upper body back to Unitree, walk command zero; Unitree's controller keeps the robot up"
+            )
+        arms.tick(now, watchdog.forwarding)
+
+
 def hand_state_to_dict(msg: HandState_ | MotorStates_) -> dict[str, Any]:
     """Convert a Dex3 `HandState_` or Dex1 `MotorStates_` to a JSON-serializable dictionary."""
     states = msg.motor_state if hasattr(msg, "motor_state") else msg.states
@@ -347,6 +428,13 @@ def start_hand_bridge(family: str, ctx: zmq.Context) -> list[threading.Thread]:
     return threads
 
 
+def camera_process(config: dict, port: int) -> None:
+    """Child process: the ZMQ image server (camera capture, JPEG / depth PNG encoding, publishing)."""
+    logging.basicConfig(level=logging.INFO)
+    with contextlib.suppress(KeyboardInterrupt):
+        ImageServer(config, port=port).run()
+
+
 def headhand_process(device_kwargs, handshake, server_kwargs, shutdown, release, ready) -> None:
     """Head/hand bridge in its own process: in the relay's threads it waited on the GIL (lowstate JSON at 500 Hz,
     camera encoding) and ran at ~25 Hz. `shutdown`, `release` and `ready` are multiprocessing Events."""
@@ -395,6 +483,9 @@ def build_camera_config(args: argparse.Namespace) -> dict:
             "type": "intelrealsense",
             "serial_number_or_name": args.camera_serial,
             "shape": [args.camera_height, args.camera_width],
+            # depth aligned to color: depth pixel (u, v) is color pixel (u, v); sent as lossless 16-bit PNG
+            "use_depth": bool(getattr(args, "camera_depth", False)),
+            "align_depth": bool(getattr(args, "camera_depth", False)),
         }
     else:
         camera_entry = {
@@ -418,6 +509,11 @@ def main() -> None:
     parser.add_argument("--camera-height", type=int, default=480, help="Camera height (default: 480)")
     parser.add_argument("--camera-port", type=int, default=5555, help="Camera ZMQ port (default: 5555)")
     parser.add_argument(
+        "--camera-depth",
+        action="store_true",
+        help="RealSense only: also stream the depth map, aligned to the color image (uint16 mm, lossless PNG)",
+    )
+    parser.add_argument(
         "--hands", choices=["none", "dex3", "dex1"], default="none", help="Also bridge Dex3/Dex1 topics"
     )
     parser.add_argument(
@@ -437,6 +533,23 @@ def main() -> None:
     parser.add_argument("--headhand-state-port", type=int, default=HEADHAND_STATE_PORT)
     parser.add_argument("--headhand-cmd-port", type=int, default=HEADHAND_CMD_PORT)
     parser.add_argument("--no-handshake", action="store_true", help="Skip head/hand connect handshake")
+    parser.add_argument(
+        "--locomotion",
+        choices=LOCOMOTION_MODES,
+        default="lowlevel",
+        help="lowlevel: take the whole body from Unitree (the client runs a locomotion policy such as GR00T, or "
+        "none); unitree: Unitree's own locomotion keeps the legs, the client commands the waist/arms "
+        "(rt/arm_sdk) and the walk velocity; a client exit or Ctrl-C leaves the robot standing (default: "
+        "%(default)s)",
+    )
+    parser.add_argument(
+        "--max-velocity",
+        type=float,
+        nargs=3,
+        default=list(DEFAULT_MAX_VELOCITY),
+        metavar=("VX", "VY", "WZ"),
+        help="Unitree mode: walk command limits |vx| |vy| m/s, |yaw rate| rad/s (default: %(default)s)",
+    )
     parser.add_argument(
         "--handover",
         choices=HANDOVER_STRATEGIES,
@@ -472,16 +585,20 @@ def main() -> None:
     estop_mask = remote_key_mask(args.estop_keys)
     if args.camera and args.camera_type == "intelrealsense" and not args.camera_serial:
         parser.error("--camera-serial is required with --camera-type intelrealsense")
+    if args.camera_depth and args.camera_type != "intelrealsense":
+        parser.error("--camera-depth needs --camera-type intelrealsense")
     if args.headhand and args.no_head and args.no_hands:
         parser.error("--headhand needs the head bus, the hand bus or both")
 
-    # Optionally start camera server in background thread
-    camera_thread = None
+    # Optionally start the camera server in its own process: as a thread of the relay it shared the GIL with the
+    # 1 kHz lowstate forwarding and, with depth (PNG encoding every frame), stalled for > 1 s under teleop load.
+    camera_proc = None
     if args.camera:
-        camera_server = ImageServer(build_camera_config(args), port=args.camera_port)
-        camera_thread = threading.Thread(target=camera_server.run, daemon=True)
-        camera_thread.start()
-        print(f"Camera server started on port {args.camera_port} ({args.camera_type})")
+        camera_proc = multiprocessing.get_context("spawn").Process(
+            target=camera_process, args=(build_camera_config(args), args.camera_port), daemon=True
+        )
+        camera_proc.start()
+        print(f"Camera server started in its own process on port {args.camera_port} ({args.camera_type})")
 
     # initialize DDS
     ChannelFactoryInitialize(0)
@@ -510,16 +627,71 @@ def main() -> None:
         mode_machine = int(first_state.mode_machine)
         print(f"mode_machine={mode_machine}")
 
-    # take low-level control from Unitree's locomotion service, then damp at once
-    take_control, give_back = make_strategy(args.handover, args.handover_fsm, args.assume_damping)
-    try:
-        take_control()
-    except RuntimeError as e:
-        print(f"error: {e}")
-        raise SystemExit(1) from e
-    handover = Handover(give_back)
-    publish_lowcmd(lowcmd_pub_debug, crc, damping_lowcmd(mode_machine))
-    print(f"low-level control taken ({args.handover}); handover {'enabled' if handover.supported else 'off'}")
+    unitree_mode = args.locomotion == "unitree"
+    arms = nav = walk = None
+    if unitree_mode:
+        # Unitree's locomotion keeps the robot: never release it, never publish rt/lowcmd.
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+
+        loco = LocoClient()
+        loco.SetTimeout(1.0)
+        loco.Init()
+        try:
+            code, fsm = loco.GetFsmId()
+        except Exception:  # noqa: BLE001
+            code, fsm = -1, None
+        if code != 0 or fsm is None:
+            print(f"error: refusing to start in Unitree mode: {check_walking(None)}")
+            raise SystemExit(1)
+        reason = check_walking(fsm)
+        if reason is not None:
+            print(f"warning: {reason} Client commands are ignored until then.")
+        arm_pub = ChannelPublisher(ARM_SDK_TOPIC, hg_LowCmd)
+        arm_pub.Init()
+        arms = ArmSdkForwarder(
+            lambda data: publish_lowcmd(arm_pub, crc, dict_to_lowcmd(data)), mode_machine=mode_machine
+        )
+        loco_lock = threading.Lock()  # the walk thread and the FSM monitor share the RPC client
+
+        def set_velocity(vx, vy, wz, d):
+            with loco_lock:
+                return loco.SetVelocity(vx, vy, wz, d)
+
+        def get_fsm():
+            with loco_lock:
+                code, fsm = loco.GetFsmId()
+            return fsm if code == 0 else None
+
+        nav = NavForwarder(set_velocity, args.max_velocity)
+
+        def on_walk_lost(fsm):
+            session = watchdog.estop()
+            arms.estop()
+            if session is not None:
+                print(
+                    f"unitree loco: FSM {fsm}: upper body back to Unitree, session {session} stopped",
+                    flush=True,
+                )
+
+        walk = WalkMonitor(get_fsm, on_walk_lost)
+        walk.poll()
+        handover = Handover(None)
+        print(
+            f"Unitree mode: loco FSM {fsm}, Unitree's locomotion keeps the legs; walk limits {args.max_velocity}"
+        )
+    else:
+        # take low-level control from Unitree's locomotion service, then damp at once
+        take_control, give_back = make_strategy(args.handover, args.handover_fsm, args.assume_damping)
+        try:
+            take_control()
+        except RuntimeError as e:
+            print(f"error: {e}")
+            raise SystemExit(1) from e
+        handover = Handover(give_back)
+        publish_lowcmd(lowcmd_pub_debug, crc, damping_lowcmd(mode_machine))
+        print(
+            f"low-level control taken ({args.handover}); handover {'enabled' if handover.supported else 'off'}"
+        )
 
     # initialize ZMQ
     ctx = zmq.Context.instance()
@@ -540,6 +712,10 @@ def main() -> None:
     t_state = threading.Thread(
         target=state_forward_loop,
         args=(lowstate_sub, lowstate_sock, state_period, shutdown_event, handover, watchdog, estop_mask),
+        kwargs={
+            "idle_state": walk.state if unitree_mode else "damping",
+            "on_estop": arms.estop if arms is not None else None,
+        },
     )
     print(f"remote e-stop: {args.estop_keys or 'off'}")
     t_state.start()
@@ -573,22 +749,42 @@ def main() -> None:
     print("bridge running (lowstate -> zmq, lowcmd -> dds)")
 
     # run command forwarding in main thread
+    t_nav = None
     try:
-        cmd_forward_loop(
-            lowcmd_sock,
-            lowcmd_pub_debug,
-            crc,
-            watchdog,
-            mode_machine,
-            shutdown_event=shutdown_event,
-            handover=handover,
-        )
+        if unitree_mode:
+            t_nav = threading.Thread(
+                target=nav.run, args=(shutdown_event, lambda: watchdog.forwarding), daemon=True
+            )
+            t_nav.start()
+            threading.Thread(target=walk.run, args=(shutdown_event,), daemon=True).start()
+            arm_sdk_forward_loop(
+                lowcmd_sock, arms, nav, watchdog, shutdown_event=shutdown_event, accept=lambda: walk.walking
+            )
+        else:
+            cmd_forward_loop(
+                lowcmd_sock,
+                lowcmd_pub_debug,
+                crc,
+                watchdog,
+                mode_machine,
+                shutdown_event=shutdown_event,
+                handover=handover,
+            )
     except KeyboardInterrupt:
         print("shutting down bridge...")
     finally:
         # Leave the robot in damping, never in the last client command or zero torque, unless it was handed
-        # over to Unitree's controller.
-        if handover.state == HandoverState.DONE:
+        # over to Unitree's controller (or Unitree's controller never left it: Unitree mode).
+        if unitree_mode:
+            shutdown_event.set()
+            if t_nav is not None:
+                t_nav.join(timeout=1.0)
+            with contextlib.suppress(Exception):
+                nav.stop()
+            with contextlib.suppress(Exception):
+                arms.release()
+            print("robot left with Unitree's controller (upper body handed back, walk command zero)")
+        elif handover.state == HandoverState.DONE:
             print("robot left with Unitree's controller (handed over)")
         else:
             for _ in range(5):
@@ -605,8 +801,9 @@ def main() -> None:
             proc.join(timeout=3.0)
             if proc.is_alive():
                 proc.terminate()
-        if camera_thread is not None:
-            camera_thread.join(timeout=2.0)
+        if camera_proc is not None:
+            camera_proc.terminate()
+            camera_proc.join(timeout=3.0)
 
 
 if __name__ == "__main__":

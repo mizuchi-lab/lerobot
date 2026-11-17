@@ -268,7 +268,15 @@ class UnitreeG1(Robot):
         self._relay_handover: str | None = None
         self._relay_state: str | None = None
         self._relay_forwarded = False  # the relay has forwarded this client's commands at least once
+        self.max_lowstate_age_s = (
+            0.0  # largest lowstate age seen by the fault check (diagnostics; reset freely)
+        )
         self._hold_q: list[float] | None = None
+
+    @property
+    def _external_locomotion(self) -> bool:
+        """Unitree's own locomotion keeps the legs (`UnitreeLocomotion`, relay `--locomotion unitree`)."""
+        return getattr(self.controller, "external", False) is True
 
     @property
     def _locomotion_gated(self) -> bool:
@@ -276,7 +284,15 @@ class UnitreeG1(Robot):
             not self.config.is_simulation
             and self.controller is not None
             and self.config.locomotion_start_gate
+            and not self._external_locomotion
         )
+
+    def _write_lowcmd(self) -> None:
+        """Send the command message (with the walk command for Unitree's controller in Unitree mode)."""
+        if self._external_locomotion:
+            self.lowcmd_publisher.Write(self.msg, nav=list(self.controller.velocity))
+        else:
+            self.lowcmd_publisher.Write(self.msg)
 
     def _sim_band_attached(self) -> bool:
         """True while the simulated robot hangs on the MuJoCo elastic band."""
@@ -648,24 +664,42 @@ class UnitreeG1(Robot):
             with self._lowstate_lock:
                 age = now - self._lowstate_t
                 state = self._relay_state
+            self.max_lowstate_age_s = max(self.max_lowstate_age_s, age)
             if age > self.config.lowstate_timeout_s:
                 self._fault = f"robot state is {age:.2f}s old (limit {self.config.lowstate_timeout_s}s)"
             elif state == "forwarding":
                 self._relay_forwarded = True
             elif state == "damping" and self._relay_forwarded:
                 self._fault = "the relay put the robot in damping (remote e-stop or relay watchdog)"
+            elif state in ("unitree", "unitree_not_walking") and self._relay_forwarded:
+                self._fault = (
+                    "the relay handed the arms back to Unitree (remote e-stop, Unitree left Regular mode or relay "
+                    "watchdog)"
+                )
             if self._fault is not None:
-                logger.error(f"[UnitreeG1] {self._fault}: robot in DAMPING. Restart the client to resume.")
+                where = (
+                    "Unitree's controller has the robot" if self._external_locomotion else "robot in DAMPING"
+                )
+                logger.error(f"[UnitreeG1] {self._fault}: {where}. Restart the client to resume.")
                 self._send_damping()
         return self._fault is not None
 
     def _raise_if_faulted(self) -> None:
         if self._fault is not None:
-            raise RuntimeError(f"UnitreeG1 stopped in damping: {self._fault}")
+            stopped = "stopped (Unitree has the robot)" if self._external_locomotion else "stopped in damping"
+            raise RuntimeError(f"UnitreeG1 {stopped}: {self._fault}")
 
     def _send_damping(self) -> None:
-        """Put every body motor in damping (kp 0, kd > 0, tau 0) and block every later command."""
+        """Put every body motor in damping (kp 0, kd > 0, tau 0) and block every later command. With Unitree's
+        locomotion, only stop commanding: the relay hands the upper body back and Unitree keeps the robot up."""
         if self.msg is None:
+            return
+        if self._external_locomotion:
+            with self._lowcmd_lock:
+                self._damping = True
+            logger.info(
+                "[UnitreeG1] Stopped commanding: the relay hands the arms back to Unitree's controller"
+            )
             return
         try:
             with self._lowcmd_lock:
@@ -743,11 +777,54 @@ class UnitreeG1(Robot):
             logger.warning("[UnitreeG1] Ctrl-C during the handover: damping")
             self._send_damping()
 
+    @property
+    def _locomotion_running(self) -> bool:
+        """The locomotion policy commands the legs (not gated off, not holding stiffly)."""
+        return self.controller is not None and (not self._locomotion_gated or self._locomotion_enabled)
+
+    def _standby(self) -> None:
+        """Keep the locomotion policy balancing in place until Ctrl-C, the relay's damping (remote e-stop,
+        watchdog) or a lost robot state; the caller damps afterwards."""
+        with self._controller_action_lock:
+            height = self.controller_input.get(BASE_HEIGHT_KEY)
+            self.controller_input = default_remote_input()
+            self.controller_input.update(dict.fromkeys(NAV_KEYS, 0.0))
+            if height is not None:
+                self.controller_input[BASE_HEIGHT_KEY] = height
+        logger.warning(
+            "[UnitreeG1] STANDBY: locomotion keeps balancing in place (zero velocity, arms at their last "
+            "targets). Ctrl-C or L2+B on the remote: damping (put the robot on the gantry first)."
+        )
+        start = log_t = time.monotonic()
+        try:
+            while True:
+                now = time.monotonic()
+                if self._lowstate_fault(now):
+                    logger.warning(f"[UnitreeG1] Standby ended by a fault after {now - start:.1f}s")
+                    return
+                if self._controller_thread is None or not self._controller_thread.is_alive():
+                    logger.error("[UnitreeG1] Standby: the controller thread stopped: damping")
+                    return
+                if now - log_t >= 5.0:
+                    with self._lowstate_lock:
+                        state = self._relay_state
+                    logger.info(
+                        f"[UnitreeG1] Standby {now - start:.0f}s, relay {state}, max state age "
+                        f"{self.max_lowstate_age_s * 1e3:.0f} ms: Ctrl-C or L2+B to damp"
+                    )
+                    self.max_lowstate_age_s = 0.0
+                    log_t = now
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            logger.warning(f"[UnitreeG1] Ctrl-C in standby after {time.monotonic() - start:.1f}s: damping")
+
     def _republish_lowcmd(self) -> None:
         """Send the current command message again (the last targets, or damping once sent)."""
         with self._lowcmd_lock:
+            if self._damping and self._external_locomotion:
+                return  # Unitree mode: stopped means silent
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            self._write_lowcmd()
 
     def _keepalive_loop(self) -> None:
         """Real robot without a controller: republish at 50 Hz so the relay's watchdog sees a live client even
@@ -786,7 +863,7 @@ class UnitreeG1(Robot):
                     self.msg.motor_cmd[motor.value].tau = tau[motor.value] if tau is not None else 0.0
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            self._write_lowcmd()
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
@@ -997,18 +1074,31 @@ class UnitreeG1(Robot):
             return
         with self._lowstate_lock:
             state = self._relay_state
-        if state == "damping":
-            logger.info("[UnitreeG1] Relay reports the robot in damping")
+        expected = "unitree" if self._external_locomotion else "damping"
+        if state == expected:
+            logger.info(
+                "[UnitreeG1] Relay reports Unitree's controller in charge (Unitree mode)"
+                if self._external_locomotion
+                else "[UnitreeG1] Relay reports the robot in damping"
+            )
             return
         hint = {
             None: "the relay does not report its state (an image without the damping watchdog?)",
+            "damping": "the relay runs in low-level mode (robot in damping); UnitreeLocomotion needs "
+            "`run_g1_server.py --locomotion unitree`",
+            "unitree": "the relay runs in Unitree mode (`--locomotion unitree`); this client needs "
+            "`--robot.controller=UnitreeLocomotion`",
+            "unitree_not_walking": "Unitree's controller is not in Regular mode: stand the robot up (L2+Up) and "
+            "press R1+X on the Unitree remote"
+            if self._external_locomotion
+            else "the relay runs in Unitree mode (`--locomotion unitree`)",
             "forwarding": "another client is commanding the robot",
             "handover": "a handover to Unitree's controller is in progress",
             "handed_over": "the robot was handed to Unitree's controller; restart the relay",
         }.get(state, f"unknown relay state {state!r}")
         self.msg = None  # disconnect() then sends nothing
         self.disconnect()
-        raise RuntimeError(f"Robot not confirmed in damping: {hint}. Nothing was sent.")
+        raise RuntimeError(f"Robot not confirmed in {expected}: {hint}. Nothing was sent.")
 
     def _connect_head_hand(self, calibrate: bool) -> None:
         try:
@@ -1144,6 +1234,20 @@ class UnitreeG1(Robot):
             self._arm_sim_band_release()
 
     def disconnect(self):
+        # Real robot: with the locomotion policy running, keep the robot standing until the operator damps it.
+        # (Unitree's locomotion needs no standby: it keeps the robot up whatever the client does.)
+        if (
+            not self._external_locomotion
+            and not self.config.is_simulation
+            and self.config.standby_on_exit
+            and not self._shutdown_event.is_set()
+            and self._fault is None
+            and self.msg is not None
+        ):
+            if self._locomotion_running:
+                self._standby()
+            else:
+                logger.info("[UnitreeG1] Standby skipped: locomotion is not running (damping as usual)")
         if self.headhand is not None:
             if not self.config.is_simulation:
                 with contextlib.suppress(Exception):

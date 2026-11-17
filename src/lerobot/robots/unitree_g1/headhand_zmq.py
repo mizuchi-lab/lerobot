@@ -256,7 +256,9 @@ class HeadHandServer:
                     self._release.clear()
                     self.device.set_torque(False)
                     self._torque_on = False
-                    logger.warning("Head/hand torque off: the relay damped the body")
+                    logger.warning(
+                        "Head/hand torque off: the relay stopped the client session (exit, watchdog or e-stop)"
+                    )
             except Exception as e:
                 error = str(e)
             fault = getattr(self.device, "fault", None)

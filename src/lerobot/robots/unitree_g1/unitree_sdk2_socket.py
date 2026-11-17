@@ -179,15 +179,18 @@ class ChannelPublisher:
         """Connect the command socket of this topic."""
         self._sock = _socket(zmq.PUSH, self.topic)
 
-    def Write(self, msg: Any, handover: bool = False) -> None:  # noqa: N802
+    def Write(self, msg: Any, handover: bool = False, nav: list[float] | None = None) -> None:  # noqa: N802
         """Serialize and send a command message to the robot; `handover` asks the relay to give the robot
-        back to Unitree's controller while holding this command."""
+        back to Unitree's controller while holding this command; `nav` is the walk command (vx, vy, yaw rate)
+        for Unitree's controller (relay `--locomotion unitree`)."""
         if self._sock is None:
             raise RuntimeError("Init must be called first")
 
         data = {**lowcmd_to_dict(self.topic, msg), "session": _session}
         if handover:
             data["handover"] = True
+        if nav is not None:
+            data["nav"] = [float(v) for v in nav]
         payload = json.dumps(data).encode("utf-8")
         self._sock.send(payload)
 

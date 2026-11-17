@@ -518,3 +518,74 @@ def test_start_headhand_process_raises_when_the_child_fails():
             {"state_port": 0, "cmd_port": 0},
             15.0,
         )
+
+
+def _standby_robot(**kwargs):
+    return _real_robot(
+        controller="GrootLocomotionController", locomotion_start_gate=False, standby_on_exit=True, **kwargs
+    )
+
+
+def _setup_controller(robot):
+    robot.controller.run_step.return_value = {"kLeftHipPitch.q": 0.1}
+    robot.controller.kp = np.full(29, 100.0)
+    robot.controller.kd = np.full(29, 2.0)
+
+
+@sdk
+def test_real_standby_on_exit_keeps_the_controller_running_until_the_relay_damps():
+    with _standby_robot() as (robot, mocks, written):
+        _setup_controller(robot)
+        mocks["lowstate_msg"].relay_state = "forwarding"
+        robot.config.require_damping_at_connect = False
+        robot.connect(calibrate=False)
+        robot.send_action({"kNavVx.cmd": 0.5})
+        time.sleep(0.05)
+        calls = []
+
+        def end_standby():
+            calls.append(robot.controller.run_step.call_count)
+            mocks["lowstate_msg"].relay_state = "damping"  # L2+B on the relay
+
+        threading.Timer(0.3, end_standby).start()
+        robot.disconnect()
+        assert calls and calls[0] > 5  # the policy kept running during the standby
+        last_input = robot.controller.run_step.call_args_list[calls[0] - 1][0][0]
+        assert last_input["kNavVx.cmd"] == 0.0  # standby commands zero velocity
+        assert _all_damping(written[-1])
+
+
+@sdk
+def test_real_standby_ctrl_c_damps():
+    with _standby_robot() as (robot, _, written):
+        _setup_controller(robot)
+        robot.connect(calibrate=False)
+        time.sleep(0.05)
+        fault = robot._lowstate_fault
+        robot._lowstate_fault = MagicMock(side_effect=KeyboardInterrupt)
+        robot._standby()
+        robot._lowstate_fault = fault
+        assert robot._controller_thread.is_alive()  # standby returns; disconnect damps afterwards
+        robot.disconnect()
+        assert _all_damping(written[-1])
+
+
+@sdk
+def test_real_standby_skipped_while_locomotion_is_gated_off():
+    with _real_robot(controller="GrootLocomotionController", standby_on_exit=True) as (robot, _, written):
+        _setup_controller(robot)
+        robot.connect(calibrate=False)
+        time.sleep(0.05)
+        robot._standby = MagicMock()
+        robot.disconnect()
+        robot._standby.assert_not_called()
+        assert _all_damping(written[-1])
+
+
+def test_standby_on_exit_config_checks():
+    from lerobot.robots.unitree_g1.config_unitree_g1 import UnitreeG1Config
+
+    with pytest.raises(ValueError, match="exclusive"):
+        UnitreeG1Config(controller="GrootLocomotionController", standby_on_exit=True, handover_on_exit=True)
+    with pytest.raises(ValueError, match="locomotion controller"):
+        UnitreeG1Config(standby_on_exit=True)
