@@ -294,6 +294,35 @@ def test_walk_false_zeroes_navigation_and_walking_axes(clock):
     assert set(action) == set(step(make_teleop(clock), clock))
 
 
+def test_sticks_scale_the_walk_command_to_max_walk_speed(clock):
+    teleop = make_teleop(clock, max_walk_speed=(0.5, 0.3, 0.6))
+    teleop.send_feedback(observation())
+    press(teleop, clock, "a")
+    # Left stick fully forward and half left, right stick fully right (vuer: y is negative pushed forward).
+    frame = XRFrame(tracking=True, sticks={"left": (-0.5, -1.0), "right": (1.0, 0.0)})
+    action = step(teleop, clock, frame)
+    assert action["kNavVx.cmd"] == pytest.approx(0.5)
+    assert action["kNavVy.cmd"] == pytest.approx(0.15)
+    assert action["kNavYawRate.cmd"] == pytest.approx(-0.6)
+    # The raw stick axes are untouched (the remote keys are not the walk command).
+    assert action["remote.ly"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_walk_speed": (0.5, 0.3)},
+        {"max_walk_speed": (0.5, -0.1, 0.6)},
+        {"max_arm_speed_rad_s": 0.0},
+        {"engage_arm_speed_rad_s": -1.0},
+        {"head_speed_rad_s": 0.0},
+    ],
+)
+def test_speed_limits_are_validated(overrides):
+    with pytest.raises(ValueError):
+        UnitreeG1XRTeleopConfig(**overrides)
+
+
 def test_walk_true_keeps_the_remote_axes(clock):
     teleop = make_teleop(clock)
     teleop.send_feedback(observation())

@@ -604,6 +604,11 @@ class UnitreeG1XRTeleop(Teleoperator):
         buttons[_WAIST_RAISE_KEY] = float(raise_)
         buttons[_WAIST_LOWER_KEY] = float(lower)
         nav = nav_from_remote(axes["remote.lx"], axes["remote.ly"], axes["remote.rx"])
+        # Full stick = max_walk_speed: the command sent (and recorded) is in m/s and rad/s, already limited.
+        nav = {
+            key: value * limit
+            for (key, value), limit in zip(nav.items(), self.config.max_walk_speed, strict=True)
+        }
         if not self.config.walk:
             nav = dict.fromkeys(nav, 0.0)  # no -0.0 from the sign flips
         band_toggle = {

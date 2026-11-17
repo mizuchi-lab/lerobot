@@ -69,6 +69,10 @@ class UnitreeG1XRTeleopConfig(TeleoperatorConfig):
     hand_blend_per_s: float = 4.0
     invert_head_pitch: bool = False
     stick_deadzone: float = 0.1
+    # Walk command at full stick deflection: forward / backward (m/s), sideways (m/s), turn (rad/s). The sticks
+    # scale `kNavVx/Vy/YawRate.cmd` linearly up to these, so the recorded command is the one the robot is asked to
+    # execute (keep them at or below the limits of the locomotion behind it, e.g. the relay's --max-velocity).
+    max_walk_speed: tuple[float, float, float] = (1.0, 1.0, 1.0)
     # False: the sticks do not walk or turn the robot (kNav* and the walking remote axes are recorded as 0), e.g.
     # for grasp-only data at the table. X/Y base height still works.
     walk: bool = True
@@ -101,6 +105,12 @@ class UnitreeG1XRTeleopConfig(TeleoperatorConfig):
             raise ValueError(f"display_ego_scale must be > 0, got {self.display_ego_scale}")
         if self.band_toggle_hold_s <= 0:
             raise ValueError(f"band_toggle_hold_s must be > 0, got {self.band_toggle_hold_s}")
+        self.max_walk_speed = tuple(float(v) for v in self.max_walk_speed)
+        if len(self.max_walk_speed) != 3 or any(v < 0 for v in self.max_walk_speed):
+            raise ValueError(f"max_walk_speed must be (vx, vy, yaw rate) >= 0, got {self.max_walk_speed!r}")
+        for name in ("max_arm_speed_rad_s", "engage_arm_speed_rad_s", "head_speed_rad_s"):
+            if not getattr(self, name) > 0:
+                raise ValueError(f"{name} must be > 0, got {getattr(self, name)}")
         if self.delete_confirm_s <= 0:
             raise ValueError(f"delete_confirm_s must be > 0, got {self.delete_confirm_s}")
         for name, value, allowed in (

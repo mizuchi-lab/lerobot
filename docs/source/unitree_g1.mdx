@@ -573,6 +573,18 @@ the robot's forward direction and press A.
 | Left stick click             | Discard and re-record the episode                                                                                                                     |
 | Both grips, 1 s (disengaged) | Start / stop locomotion on the real robot; in sim, attach / release the elastic band (`--robot.sim_band_toggle_button=null` disables the sim gesture) |
 
+Speed limits of the XR teleop, all in the teleop (the robot applies whatever target it receives):
+
+| Flag                              | Default         | Limits                                                                                   |
+| --------------------------------- | --------------- | ---------------------------------------------------------------------------------------- |
+| `--teleop.max_arm_speed_rad_s`    | 3.0             | Arm joint target speed while following (rad/s)                                           |
+| `--teleop.engage_arm_speed_rad_s` | 0.5             | Arm joint target speed on the approach after A (rad/s)                                   |
+| `--teleop.head_speed_rad_s`       | 4.0             | Head yaw / pitch target speed (rad/s)                                                    |
+| `--teleop.max_walk_speed`         | `[1.0,1.0,1.0]` | Walk command at full stick: forward (m/s), sideways (m/s), turn (rad/s), scaled linearly |
+
+Keep `max_walk_speed` at or below what the locomotion accepts (the server's `--max-velocity` with Unitree's own
+locomotion): the recorded `kNav*` is then the command the robot executes.
+
 With `lerobot-record`, each episode starts only once the operator is ready: locomotion runs (real robot with
 a controller) or the sim elastic band is released, and the XR teleoperator is engaged with A. Pass
 `--wait_for_operator=false` to start episodes immediately as before.
