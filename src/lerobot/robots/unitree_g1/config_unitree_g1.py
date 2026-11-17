@@ -82,9 +82,9 @@ class UnitreeG1Config(RobotConfig):
     is_simulation: bool = True
 
     # HF Hub repo id passed to `make_env(..., trust_remote_code=True)` when is_simulation is True
-    sim_env_repo_id: str = "k-valentin/unitree-g1-mujoco"
+    sim_env_repo_id: str = "mizuchi-lab/unitree-g1-mujoco"
 
-    # Simulation only: the sim's WORLD, a world of k-valentin/unitree-g1-mujoco-worlds by name ("pick_cylinder"),
+    # Simulation only: the sim's WORLD, a world of mizuchi-lab/unitree-g1-mujoco-worlds by name ("pick_cylinder"),
     # "owner/repo[@rev]:name" or a local folder. None keeps the sim's own default, the plain floor.
     sim_world: str | None = None
     # Simulation only: the sim's WORLD_RANDOMIZE, metres of uniform xy jitter (and +-sim_world_randomize_yaw) of

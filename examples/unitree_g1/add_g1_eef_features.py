@@ -41,8 +41,8 @@ Example:
 
 ```shell
 python examples/unitree_g1/add_g1_eef_features.py \
-    --repo-id k-valentin/g1_xr_sim_pick_cylinder_20261013_110335
-# -> k-valentin/g1_xr_sim_pick_cylinder_20261013_110335_eef (under $HF_LEROBOT_HOME)
+    --repo-id mizuchi-lab/g1_xr_sim_pick_cylinder_20261013_110335
+# -> mizuchi-lab/g1_xr_sim_pick_cylinder_20261013_110335_eef (under $HF_LEROBOT_HOME)
 ```
 
 Drop the table camera afterwards with ``lerobot-edit-dataset`` (``remove_feature``) if the policy

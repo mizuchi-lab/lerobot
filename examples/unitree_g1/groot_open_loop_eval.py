@@ -28,7 +28,7 @@ Example:
 ```shell
 python examples/unitree_g1/groot_open_loop_eval.py \
     --policy-path outputs/train/my_run/checkpoints/last/pretrained_model \
-    --repo-id k-valentin/g1_xr_sim_pick_cylinder_20261013_110335_ego \
+    --repo-id mizuchi-lab/g1_xr_sim_pick_cylinder_20261013_110335_ego \
     --episodes 0 1 --execution-horizon 16 --plot-dir outputs/open_loop_plots
 ```
 """

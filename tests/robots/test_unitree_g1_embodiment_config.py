@@ -96,7 +96,7 @@ class TestEmbodimentConfigDefaults:
         assert HEADHAND_CMD_PORT == 6002
 
     def test_sim_env_repo_id(self):
-        assert _ah_config().sim_env_repo_id == "k-valentin/unitree-g1-mujoco"
+        assert _ah_config().sim_env_repo_id == "mizuchi-lab/unitree-g1-mujoco"
 
     def test_type(self):
         assert _ah_config().type == "unitree_g1"

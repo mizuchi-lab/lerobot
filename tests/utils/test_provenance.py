@@ -26,8 +26,8 @@ needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not inst
 
 
 def test_hub_snapshot_info_parses_cache_paths(tmp_path):
-    snap = tmp_path / "hub" / "models--k-valentin--unitree-g1-mujoco" / "snapshots" / "abc123"
-    assert hub_snapshot_info(snap) == {"repo_id": "k-valentin/unitree-g1-mujoco", "revision": "abc123"}
+    snap = tmp_path / "hub" / "models--mizuchi-lab--unitree-g1-mujoco" / "snapshots" / "abc123"
+    assert hub_snapshot_info(snap) == {"repo_id": "mizuchi-lab/unitree-g1-mujoco", "revision": "abc123"}
     # Deeper paths inside the snapshot resolve to the same revision
     assert hub_snapshot_info(snap / "worlds" / "w" / "world.xml")["revision"] == "abc123"
 

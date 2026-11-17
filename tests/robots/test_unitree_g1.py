@@ -126,7 +126,7 @@ class TestUnitreeG1Config:
         assert cfg2.kp[0] != 999.0
 
     def test_default_sim_env_repo_id(self):
-        assert UnitreeG1Config().sim_env_repo_id == "k-valentin/unitree-g1-mujoco"
+        assert UnitreeG1Config().sim_env_repo_id == "mizuchi-lab/unitree-g1-mujoco"
 
     def test_sim_world_defaults_to_the_sims_own(self):
         cfg = UnitreeG1Config()
@@ -929,18 +929,18 @@ def _fake_sim_env(env_file, world_xml):
 def test_provenance_of_sim_from_hub_snapshots(unitree_g1, tmp_path):
     robot, _ = unitree_g1
     hub = tmp_path / "hub"
-    sim_dir = hub / "models--k-valentin--unitree-g1-mujoco" / "snapshots" / "simsha"
-    worlds_snap = hub / "models--k-valentin--unitree-g1-mujoco-worlds" / "snapshots" / "worldsha"
+    sim_dir = hub / "models--mizuchi-lab--unitree-g1-mujoco" / "snapshots" / "simsha"
+    worlds_snap = hub / "models--mizuchi-lab--unitree-g1-mujoco-worlds" / "snapshots" / "worldsha"
     world_xml = worlds_snap / "worlds" / "w1" / "world.xml"
     robot.sim_env = _fake_sim_env(sim_dir / "env.py", world_xml)
     fake_lerobot = {"commit": "abc", "dirty": False}
     with patch("lerobot.robots.unitree_g1.unitree_g1.lerobot_info", return_value=fake_lerobot):
         info = robot.provenance()
     assert info["lerobot"] == {"commit": "abc", "dirty": False}
-    assert info["sim"] == {"repo_id": "k-valentin/unitree-g1-mujoco", "revision": "simsha"}
+    assert info["sim"] == {"repo_id": "mizuchi-lab/unitree-g1-mujoco", "revision": "simsha"}
     assert info["world"] == {
         "name": "w1",
-        "repo_id": "k-valentin/unitree-g1-mujoco-worlds",
+        "repo_id": "mizuchi-lab/unitree-g1-mujoco-worlds",
         "revision": "worldsha",
     }
     assert info["embodiment"]["body"] == robot.config.body
