@@ -480,7 +480,8 @@ class RecordSession:
 
 
 def _not_ready(robot, teleop) -> list[tuple[str, str]]:
-    """(code, hint) per component whose `ready_to_record()` is False; code is "robot", "robot_settling" or "teleop"."""
+    """(code, hint) per component whose `ready_to_record()` is False; code is "robot", "robot_settling", "teleop"
+    or "teleop_approaching" (engaged, but the arms still move to the operator's pose: not recorded)."""
     missing = []
     ready = getattr(robot, "ready_to_record", None)
     if callable(ready) and not ready():
@@ -498,7 +499,13 @@ def _not_ready(robot, teleop) -> list[tuple[str, str]]:
     for t in teleop if isinstance(teleop, list) else [teleop]:
         ready = getattr(t, "ready_to_record", None)
         if callable(ready) and not ready():
-            missing.append(("teleop", f"{type(t).__name__}: engage the teleoperator (XR: press A)"))
+            reason = getattr(t, "not_ready_reason", None)
+            if callable(reason) and reason() == "approaching":
+                missing.append(
+                    ("teleop_approaching", f"{type(t).__name__}: arms approaching the operator's pose")
+                )
+            else:
+                missing.append(("teleop", f"{type(t).__name__}: engage the teleoperator (XR: press A)"))
     return missing
 
 
@@ -729,24 +736,27 @@ def record(
             dataset.finalize()
             dataset = apply_session_deletions(dataset)
 
-        if robot.is_connected:
-            robot.disconnect()
-        if teleop and teleop.is_connected:
-            teleop.disconnect()
+        # Push before disconnecting the robot: a robot that stays up on exit (e.g. the G1's standby_on_exit)
+        # blocks in disconnect() until the operator stops it.
+        try:
+            if cfg.dataset.push_to_hub:
+                if dataset and read_deleted_episodes(dataset.root):
+                    logging.warning("Deleted episodes are still pending (see above) — skipping push to hub")
+                elif dataset and dataset.num_episodes > 0:
+                    dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+                else:
+                    logging.warning("No episodes saved — skipping push to hub")
+        finally:
+            if robot.is_connected:
+                robot.disconnect()
+            if teleop and teleop.is_connected:
+                teleop.disconnect()
 
-        if listener is not None:
-            listener.stop()
+            if listener is not None:
+                listener.stop()
 
-        if cfg.display_data:
-            shutdown_visualization(cfg.display_mode)
-
-        if cfg.dataset.push_to_hub:
-            if dataset and read_deleted_episodes(dataset.root):
-                logging.warning("Deleted episodes are still pending (see above) — skipping push to hub")
-            elif dataset and dataset.num_episodes > 0:
-                dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
-            else:
-                logging.warning("No episodes saved — skipping push to hub")
+            if cfg.display_data:
+                shutdown_visualization(cfg.display_mode)
 
         log_say("Exiting", cfg.play_sounds)
     return dataset

@@ -60,6 +60,21 @@ def test_components_not_ready_names_the_missing_ones():
     assert "press A" in missing[1]
 
 
+class Approaching:
+    """An engaged teleop whose arms still approach the operator's pose."""
+
+    def ready_to_record(self):
+        return False
+
+    def not_ready_reason(self):
+        return "approaching"
+
+
+def test_components_not_ready_reports_the_arm_approach():
+    assert lerobot_record._not_ready(Plain(), Approaching())[0][0] == "teleop_approaching"
+    assert "approaching" in components_not_ready(Plain(), Approaching())[0]
+
+
 def test_no_wait_when_ready():
     with patch("lerobot.scripts.lerobot_record.record_loop") as loop:
         wait_until_ready(Ready(0), [Ready(0)], make_events(), play_sounds=False)

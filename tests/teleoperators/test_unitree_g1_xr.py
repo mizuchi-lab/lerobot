@@ -528,11 +528,33 @@ def test_no_resync_without_a_reset(clock):
 def test_ready_to_record_follows_engagement(clock):
     teleop = make_teleop(clock)
     teleop.send_feedback(observation())
+    teleop.arm_ik.solution[:] = 0.1  # the operator's pose is the robot's: nothing to approach
     assert teleop.ready_to_record() is False
+    assert teleop.not_ready_reason() == "engage"
     press(teleop, clock, "a")
     assert teleop.ready_to_record() is True
     press(teleop, clock, "a")
     assert teleop.ready_to_record() is False
+
+
+def test_not_ready_while_the_arms_approach_the_operator_after_a(clock):
+    teleop = make_teleop(clock, engage_arm_speed_rad_s=0.5)
+    teleop.send_feedback(observation())  # arms at 0.1, the operator's IK pose at 0.0: 0.1 rad to cover
+    press(teleop, clock, "a")
+    assert teleop.engaged
+    assert teleop.not_ready_reason() == "approaching"
+    assert teleop.ready_to_record() is False
+    step(teleop, clock, XRFrame(tracking=True), n=10)  # 0.5 rad/s x 0.2 s: within the 0.05 rad catch-up band
+    assert teleop.not_ready_reason() is None
+    assert teleop.ready_to_record() is True
+
+
+def test_overlay_shows_approaching_while_record_waits_for_the_arms(clock):
+    teleop = make_teleop(clock)
+    teleop.on_record_status({"state": "idle", "waiting_for": ["teleop_approaching"]})
+    assert [line.text for line in teleop._idle_lines()][0] == "APPROACHING"
+    teleop.on_record_status({"waiting_for": ["robot", "teleop_approaching"]})
+    assert [line.text for line in teleop._idle_lines()][0] == "WAITING"
 
 
 def test_reset_sim_on_episode_end_defaults_on():
@@ -583,8 +605,8 @@ def test_episode_end_cancels_the_grip_hold(clock):
     assert toggles(teleop, clock, grips_frame(), 30) == [0.0] * 30
 
 
-def test_episode_end_does_nothing_when_the_option_is_off(clock):
-    teleop = make_teleop(clock, reset_sim_on_episode_end=False)
+def test_episode_end_does_nothing_when_both_options_are_off(clock):
+    teleop = make_teleop(clock, reset_sim_on_episode_end=False, disengage_on_episode_end=False)
     teleop.send_feedback(observation())
     press(teleop, clock, "a")
     teleop.on_episode_end()
@@ -592,8 +614,17 @@ def test_episode_end_does_nothing_when_the_option_is_off(clock):
     assert [step(teleop, clock, XRFrame(tracking=True))[SIM_RESET_KEY] for _ in range(100)] == [0.0] * 100
 
 
+def test_episode_end_without_sim_reset_only_disengages(clock):
+    teleop = make_teleop(clock, reset_sim_on_episode_end=False)
+    teleop.send_feedback(observation())
+    press(teleop, clock, "a")
+    teleop.on_episode_end()
+    assert not teleop.engaged
+    assert [step(teleop, clock, XRFrame(tracking=True))[SIM_RESET_KEY] for _ in range(100)] == [0.0] * 100
+
+
 @pytest.mark.parametrize("feedback", [{ROBOT_IS_SIM_FEEDBACK_KEY: False}, {}])
-def test_episode_end_on_hardware_stays_engaged_without_reset_or_resync(clock, feedback):
+def test_episode_end_on_hardware_disengages_without_reset_or_resync(clock, feedback):
     teleop = make_teleop(clock)
     key = BODY_KEYS[0]
     obs = observation(**feedback)
@@ -601,12 +632,13 @@ def test_episode_end_on_hardware_stays_engaged_without_reset_or_resync(clock, fe
         del obs[ROBOT_IS_SIM_FEEDBACK_KEY]
     teleop.send_feedback(obs)
     press(teleop, clock, "a")
+    held = step(teleop, clock, XRFrame(tracking=True))[key]
     teleop.on_episode_end()
-    assert teleop.engaged
+    assert not teleop.engaged  # the next episode starts with A, not by itself
+    assert teleop.not_ready_reason() == "engage"
     assert [step(teleop, clock, XRFrame(tracking=True))[SIM_RESET_KEY] for _ in range(50)] == [0.0] * 50
-    press(teleop, clock, "a")
-    teleop.send_feedback({**obs, key: 0.7})
-    assert step(teleop, clock)[key] != pytest.approx(0.7)
+    teleop.send_feedback({**obs, key: 0.7})  # no re-sync to the measured pose: the arm keeps its target
+    assert step(teleop, clock)[key] == pytest.approx(held)
 
 
 def events_of(teleop):

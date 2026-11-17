@@ -180,7 +180,17 @@ class UnitreeG1XRTeleop(Teleoperator):
         return self._engaged
 
     def ready_to_record(self) -> bool:
-        return self._engaged
+        return self.not_ready_reason() is None
+
+    def not_ready_reason(self) -> str | None:
+        """Why `ready_to_record()` is False: "engage" (press A) or "approaching" (after A the arms still move to
+        the operator's pose at the engage speed; those frames would teach the policy a slow approach that is not
+        part of the task), else None."""
+        if not self._engaged:
+            return "engage"
+        if self._catching_up:
+            return "approaching"
+        return None
 
     def connect(self, calibrate: bool = True) -> None:
         require_package("xr_teleoperate", extra="unitree_g1_xr")
@@ -328,10 +338,13 @@ class UnitreeG1XRTeleop(Teleoperator):
         return ("last", deletable)
 
     def _idle_lines(self) -> list[Line]:
-        """Idle banner: what `lerobot-record` waits for (`waiting_for`: "robot" / "robot_settling" / "teleop"), else READY."""
+        """Idle banner: what `lerobot-record` waits for (`waiting_for`: "robot" / "robot_settling" / "teleop" /
+        "teleop_approaching"), else READY."""
         waiting_for = self._status.get("waiting_for") or []
         if "robot_settling" in waiting_for and "robot" not in waiting_for:
             return [Line("WAITING", YELLOW), Line("settling...", YELLOW)]
+        if "teleop_approaching" in waiting_for and "robot" not in waiting_for:
+            return [Line("APPROACHING", YELLOW), Line("arms catching up, hold still", YELLOW)]
         if "robot" not in waiting_for:
             return [Line("READY  A: start", GREEN)]
         # The band / locomotion hold gesture only works while disengaged.
@@ -513,15 +526,19 @@ class UnitreeG1XRTeleop(Teleoperator):
         return 1.0
 
     def on_episode_end(self) -> None:
-        # On hardware the reset is impossible and the resync would let the arms sag a step further each time.
-        if not self.config.reset_sim_on_episode_end or not self._robot_is_sim:
+        if not self.config.disengage_on_episode_end:
             return
         self._engaged = False
         self._catching_up = False
         self._grips_held_s = 0.0
         self._band_toggle_fired = False
-        self._reset_pending = True
-        logger.info("Episode ended: disengaged, resetting the sim")
+        # On hardware the reset is impossible, and a re-sync of the targets to the measured pose would let the arms
+        # sag a step further each episode: there the arms just keep their last targets.
+        if self.config.reset_sim_on_episode_end and self._robot_is_sim:
+            self._reset_pending = True
+            logger.info("Episode ended: disengaged, resetting the sim")
+        else:
+            logger.info("Episode ended: disengaged (A: engage for the next episode)")
 
     def _sim_reset(self) -> float:
         if not self._reset_pending:
