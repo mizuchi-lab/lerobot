@@ -90,10 +90,12 @@ AMAZING_HAND_CLOSE_DEG: tuple[float, float] = (60.0, -60.0)
 AMAZING_HAND_THUMB_CLOSE_DEG: tuple[float, float] = (75.0, -75.0)
 AMAZING_HAND_THUMB_FINGER = 4  # verified on both hands (2026-11-03): right servos 7/8, left 17/18
 # Lab per-servo zero trims (deg), applied at the tick layer by calibration only. Checked on both hands
-# (2026-11-03): empty-hand hold load <= 105 per mille, hold error <= 5 ticks.
+# (2026-11-03): empty-hand hold load <= 105 per mille, hold error <= 5 ticks. Left ID 17 (thumb) was replaced
+# on 2026-11-24 by a servo from another hand, horn already mounted: measured +151 ticks vs the old 20 deg trim
+# at both open (612) and closed (987), so 64 deg.
 AMAZING_HAND_MIDDLE_POS_DEG: dict[str, tuple[float, ...]] = {
     "right": (25, -20, 25, -15, 20, -25, 15, -15),
-    "left": (20, -10, 33, -35, 30, -10, 20, -8),
+    "left": (20, -10, 33, -35, 30, -10, 64, -8),
 }
 
 
