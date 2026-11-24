@@ -502,7 +502,7 @@ def _not_ready(robot, teleop) -> list[tuple[str, str]]:
             reason = getattr(t, "not_ready_reason", None)
             if callable(reason) and reason() == "approaching":
                 missing.append(
-                    ("teleop_approaching", f"{type(t).__name__}: arms approaching the operator's pose")
+                    ("teleop_approaching", f"{type(t).__name__}: arms / head approaching the operator's pose")
                 )
             else:
                 missing.append(("teleop", f"{type(t).__name__}: engage the teleoperator (XR: press A)"))

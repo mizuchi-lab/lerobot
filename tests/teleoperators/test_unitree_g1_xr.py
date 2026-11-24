@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,9 +152,65 @@ def test_first_observation_sets_the_held_targets(clock):
     action = step(teleop, clock)
     assert action["kLeftElbow.q"] == pytest.approx(0.7)
     assert action["kLeftHipPitch.q"] == pytest.approx(0.1)
-    assert action["kHeadYaw.q"] == pytest.approx(0.2)
+    assert action["kHeadYaw.q"] == pytest.approx(0.2)  # first step: dt 0
+    # Then the head heads for the front at the head speed.
+    assert step(teleop, clock)["kHeadYaw.q"] == pytest.approx(0.2 - teleop.config.head_speed_rad_s * DT)
     assert action["kRightHand.closure"] == pytest.approx(0.5)
     assert action[BASE_HEIGHT_KEY] == pytest.approx(GROOT_BASE_HEIGHT_DEFAULT)
+
+
+def test_disengaged_head_goes_to_the_front_at_the_head_speed(clock):
+    teleop = make_teleop(clock, head_speed_rad_s=1.0)
+    teleop.send_feedback(observation(**{"kHeadYaw.q": 0.3, "kHeadPitch.q": 0.9}))  # resting on the down stop
+    action = step(teleop, clock, XRFrame(tracking=True, head_yaw=0.5), n=2)  # the first step has dt 0
+    assert action["kHeadYaw.q"] == pytest.approx(0.3 - DT)
+    assert action["kHeadPitch.q"] == pytest.approx(0.9 - DT)
+    action = step(teleop, clock, XRFrame(tracking=True, head_yaw=0.5), n=100)
+    assert not teleop.engaged
+    assert action["kHeadYaw.q"] == pytest.approx(0.0) and action["kHeadPitch.q"] == pytest.approx(0.0)
+
+
+def test_locked_head_holds_its_pose_while_disengaged(clock):
+    teleop = make_teleop(clock, lock=["head"])
+    teleop.send_feedback(observation(**{"kHeadPitch.q": 0.9}))
+    assert step(teleop, clock, n=50)["kHeadPitch.q"] == pytest.approx(0.9)
+
+
+def test_not_ready_until_the_measured_head_reaches_the_headset_pose(clock):
+    teleop = make_teleop(clock, head_speed_rad_s=100.0)
+    obs = observation()
+    teleop.send_feedback(obs)
+    teleop.arm_ik.solution[:] = 0.1  # arms already at the operator's pose
+    press(teleop, clock, "a")
+    step(teleop, clock, XRFrame(tracking=True, head_pitch=0.5))
+    assert teleop.not_ready_reason() == "approaching", "commanded, but the head still reads 0.0"
+    teleop.send_feedback({**obs, "kHeadPitch.q": 0.45})
+    assert teleop.not_ready_reason() is None
+    teleop.send_feedback({**obs, "kHeadPitch.q": 0.3})
+    assert teleop.not_ready_reason() == "approaching"
+
+
+def test_slow_head_command_keeps_the_episode_waiting(clock):
+    teleop = make_teleop(clock, head_speed_rad_s=1.0)
+    obs = observation()
+    teleop.send_feedback(obs)
+    teleop.arm_ik.solution[:] = 0.1
+    press(teleop, clock, "a")
+    action = step(teleop, clock, XRFrame(tracking=True, head_yaw=0.6))
+    teleop.send_feedback({**obs, "kHeadYaw.q": action["kHeadYaw.q"]})  # the head follows its command
+    assert teleop.not_ready_reason() == "approaching"
+    action = step(teleop, clock, XRFrame(tracking=True, head_yaw=0.6), n=40)
+    teleop.send_feedback({**obs, "kHeadYaw.q": action["kHeadYaw.q"]})
+    assert teleop.not_ready_reason() is None
+
+
+def test_locked_head_is_not_waited_for(clock):
+    teleop = make_teleop(clock, lock=["head"])
+    teleop.send_feedback(observation(**{"kHeadPitch.q": 0.9}))
+    teleop.arm_ik.solution[:] = 0.1
+    press(teleop, clock, "a")
+    step(teleop, clock, XRFrame(tracking=True, head_pitch=-0.5))
+    assert teleop.not_ready_reason() is None
 
 
 @pytest.mark.parametrize(
@@ -978,3 +1035,48 @@ def test_absolute_mapping_sends_the_operator_pose(clock):
 def test_arm_mapping_is_validated():
     with pytest.raises(ValueError, match="arm_mapping"):
         UnitreeG1XRTeleopConfig(arm_mapping="mirror")
+
+
+def test_provenance_reports_the_speed_limits(clock):
+    teleop = make_teleop(
+        clock,
+        max_arm_speed_rad_s=0.4,
+        head_speed_rad_s=1.0,
+        max_walk_speed=[0.3, 0.2, 0.4],
+        lock=["left_arm"],
+    )
+    info = teleop.provenance()
+    assert info["max_arm_speed_rad_s"] == 0.4 and info["head_speed_rad_s"] == 1.0
+    assert info["max_walk_speed"] == [0.3, 0.2, 0.4] and info["lock"] == ["left_arm"]
+    assert info["arm_mapping"] == teleop.config.arm_mapping
+    json.dumps(info)  # goes into provenance.json
+
+
+def test_head_hold_goes_to_the_fixed_pose_and_ignores_the_headset(clock):
+    teleop = make_teleop(clock, head_speed_rad_s=1.0, head_hold=[0.1, 0.6])
+    obs = observation(**{"kHeadPitch.q": 0.9})
+    teleop.send_feedback(obs)
+    teleop.arm_ik.solution[:] = 0.1
+    action = step(teleop, clock, XRFrame(tracking=True, head_yaw=0.5, head_pitch=-0.3), n=2)
+    assert action["kHeadYaw.q"] == pytest.approx(DT) and action["kHeadPitch.q"] == pytest.approx(0.9 - DT)
+    press(teleop, clock, "a")
+    action = step(teleop, clock, XRFrame(tracking=True, head_yaw=0.5, head_pitch=-0.3), n=100)
+    assert action["kHeadYaw.q"] == pytest.approx(0.1) and action["kHeadPitch.q"] == pytest.approx(0.6)
+    assert teleop.not_ready_reason() == "approaching", "the measured head still reads 0.0 / 0.9"
+    teleop.send_feedback({**obs, "kHeadYaw.q": 0.1, "kHeadPitch.q": 0.62})
+    assert teleop.not_ready_reason() is None
+    assert teleop.provenance()["head_hold"] == [0.1, 0.6]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"head_hold": [0.0, 2.0]},
+        {"head_hold": [0.0]},
+        {"head_hold": [0.0, 0.5], "lock": ["head"]},
+        {"head_hold": [0.0, 0.5], "head_mount": "fixed", "head_sensor": "d435i"},
+    ],
+)
+def test_head_hold_is_validated(overrides):
+    with pytest.raises(ValueError, match="head_hold"):
+        UnitreeG1XRTeleopConfig(**overrides)

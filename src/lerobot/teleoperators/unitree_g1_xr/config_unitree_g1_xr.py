@@ -80,6 +80,10 @@ class UnitreeG1XRTeleopConfig(TeleoperatorConfig):
     # following the operator, e.g. `[left_arm]` for one fixed left-arm pose in every episode. Their keys stay
     # in the action (the held targets) and in the observation. Any of LOCK_PARTS.
     lock: tuple[str, ...] = ()
+    # Fixed head pose (yaw, pitch rad, the robot's calibrated frame, 0 = front, pitch down > 0): the head goes there at
+    # `head_speed_rad_s` and stays, engaged or not; the headset's head pose is ignored. None: the head follows the
+    # headset. E.g. a camera tilted down at the table for a whole dataset.
+    head_hold: tuple[float, float] | None = None
     # Both grips held this long while disengaged toggle the sim elastic band.
     band_toggle_hold_s: float = 1.0
     # Disengage at the end of every episode (time up, success, re-record), so each episode starts with A: the arms
@@ -128,6 +132,19 @@ class UnitreeG1XRTeleopConfig(TeleoperatorConfig):
         unknown = [part for part in self.lock if part not in LOCK_PARTS]
         if unknown:
             raise ValueError(f"Unknown lock part(s) {unknown}; expected any of {LOCK_PARTS}")
+        if self.head_hold is not None:
+            from lerobot.robots.unitree_g1.heads import HEAD_LIMITS_RAD
+
+            self.head_hold = tuple(float(v) for v in self.head_hold)
+            if self.head_mount != "pan_tilt":
+                raise ValueError(f"head_hold needs a pan/tilt head, got head_mount={self.head_mount!r}")
+            if len(self.head_hold) != 2:
+                raise ValueError(f"head_hold must be (yaw, pitch), got {self.head_hold!r}")
+            for value, (name, (lo, hi)) in zip(self.head_hold, HEAD_LIMITS_RAD.items(), strict=True):
+                if not lo <= value <= hi:
+                    raise ValueError(f"head_hold {name} {value} is outside the head limits {lo}..{hi}")
+            if "head" in self.lock:
+                raise ValueError("head_hold and lock=[head] exclude each other")
         if "head" in self.lock and self.head_mount != "pan_tilt":
             raise ValueError(f"lock has 'head' but head_mount={self.head_mount!r} has no movable head")
         if any(part.endswith("_hand") for part in self.lock) and self.end_effector not in HAND_SPECS:

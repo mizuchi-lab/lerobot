@@ -29,7 +29,9 @@ hand) ignore the operator and hold the robot's pose from the last sync (first ob
 keys stay in the action. B (twice within `delete_confirm_s`) deletes:
 the running episode (discarded like a rerecord) while recording, otherwise the last episode saved in this
 session. Hand tracking has no buttons: it engages once, when tracking first starts. Targets hold while
-tracking is lost.
+tracking is lost. While disengaged an unlocked head goes to the front at `head_speed_rad_s` (the real head
+rests on its down stop); after A an episode starts only once the arms and the measured head have reached the
+operator's pose.
 
 `lerobot-record` reports its state through `on_record_status()`; with `status_overlay` the headset image gets
 a banner with it (ready / REC time / reset / saving / delete prompt / result of the last action).
@@ -80,6 +82,8 @@ logger = logging.getLogger(__name__)
 
 _DT_CAP_S = 0.1
 _CAUGHT_UP_RAD = 0.05
+# The measured head must be this close to the headset's pose before an episode starts (~6 deg).
+_HEAD_READY_RAD = 0.1
 _RESET_RESYNC_S = 1.0
 # GrootLocomotionController's waist raise/lower slots, as in the gamepad teleop.
 _WAIST_RAISE_KEY = "remote.button.0"
@@ -136,6 +140,9 @@ class UnitreeG1XRTeleop(Teleoperator):
         self._synced_to_robot = False
         self._warned_no_camera = False
         self._measured: dict[str, float] = {}
+        self._measured_head: dict[str, float] = {}
+        # Where the headset asks the head to be (clipped to its limits), set while engaged.
+        self._head_goal: dict[str, float] | None = None
         self._buttons: dict[str, bool] = {}
         self._pending_events: set[str] = set()
         self._last_t: float | None = None
@@ -179,18 +186,44 @@ class UnitreeG1XRTeleop(Teleoperator):
     def engaged(self) -> bool:
         return self._engaged
 
+    def provenance(self) -> dict[str, Any]:
+        """The teleop settings that shape the recorded motion (written to the dataset's provenance.json)."""
+        cfg = self.config
+        return {
+            "type": "unitree_g1_xr",
+            "arm_mapping": cfg.arm_mapping,
+            "max_arm_speed_rad_s": cfg.max_arm_speed_rad_s,
+            "engage_arm_speed_rad_s": cfg.engage_arm_speed_rad_s,
+            "head_speed_rad_s": cfg.head_speed_rad_s,
+            "max_walk_speed": list(cfg.max_walk_speed),
+            "walk": cfg.walk,
+            "lock": list(cfg.lock),
+            "head_hold": None if cfg.head_hold is None else list(cfg.head_hold),
+        }
+
     def ready_to_record(self) -> bool:
         return self.not_ready_reason() is None
 
     def not_ready_reason(self) -> str | None:
         """Why `ready_to_record()` is False: "engage" (press A) or "approaching" (after A the arms still move to
-        the operator's pose at the engage speed; those frames would teach the policy a slow approach that is not
-        part of the task), else None."""
+        the operator's pose at the engage speed, or the measured head is not yet at the headset's pose; those
+        frames would teach the policy a slow approach that is not part of the task), else None."""
         if not self._engaged:
             return "engage"
-        if self._catching_up:
+        if self._catching_up or self._head_off_target():
             return "approaching"
         return None
+
+    def _head_off_target(self) -> bool:
+        """True while the head (commanded or measured) is more than _HEAD_READY_RAD from the headset's pose."""
+        if not self._head or "head" in self._locked or not self._measured_head:
+            return False
+        if self._head_goal is None:
+            return True  # engaged, but no tracked frame yet
+        return any(
+            max(abs(self._measured_head[key] - goal), abs(self._target[key] - goal)) > _HEAD_READY_RAD
+            for key, goal in self._head_goal.items()
+        )
 
     def connect(self, calibrate: bool = True) -> None:
         require_package("xr_teleoperate", extra="unitree_g1_xr")
@@ -344,7 +377,7 @@ class UnitreeG1XRTeleop(Teleoperator):
         if "robot_settling" in waiting_for and "robot" not in waiting_for:
             return [Line("WAITING", YELLOW), Line("settling...", YELLOW)]
         if "teleop_approaching" in waiting_for and "robot" not in waiting_for:
-            return [Line("APPROACHING", YELLOW), Line("arms catching up, hold still", YELLOW)]
+            return [Line("APPROACHING", YELLOW), Line("arms / head catching up, hold still", YELLOW)]
         if "robot" not in waiting_for:
             return [Line("READY  A: start", GREEN)]
         # The band / locomotion hold gesture only works while disengaged.
@@ -420,6 +453,8 @@ class UnitreeG1XRTeleop(Teleoperator):
             return
         self._check_embodiment(feedback)
         self._measured = {key: float(feedback[key]) for key in BODY_KEYS}
+        if self._head and all(key in feedback for key in HEAD_KEYS):
+            self._measured_head = {key: float(feedback[key]) for key in HEAD_KEYS}
         if self._synced_to_robot and self._resync_s <= 0.0:
             return
         for key in BODY_KEYS + (HEAD_KEYS if self._head else ()):
@@ -456,6 +491,8 @@ class UnitreeG1XRTeleop(Teleoperator):
             }
         self._engaged = True
         self._catching_up = True
+        if self.config.head_hold is None:
+            self._head_goal = None
         self._resync_s = 0.0
         logger.info("XR teleop engaged")
 
@@ -492,9 +529,26 @@ class UnitreeG1XRTeleop(Teleoperator):
     def _step_head(self, frame: Any, dt: float) -> None:
         pitch = -frame.head_pitch if self.config.invert_head_pitch else frame.head_pitch
         max_step = self.config.head_speed_rad_s * dt
+        self._head_goal = {}
         for key, angle in zip(HEAD_KEYS, (frame.head_yaw, pitch), strict=True):
             lo, hi = HEAD_LIMITS_RAD[key.removesuffix(".q")]
-            self._target[key] = _step_toward(self._target[key], _clip(angle, lo, hi), max_step)
+            self._head_goal[key] = _clip(angle, lo, hi)
+            self._target[key] = _step_toward(self._target[key], self._head_goal[key], max_step)
+
+    def _step_head_to_hold(self, dt: float) -> None:
+        """`head_hold`: the head goes to the fixed pose at the head speed and stays (the headset is ignored)."""
+        max_step = self.config.head_speed_rad_s * dt
+        self._head_goal = dict(zip(HEAD_KEYS, self.config.head_hold, strict=True))
+        for key, goal in self._head_goal.items():
+            self._target[key] = _step_toward(self._target[key], goal, max_step)
+
+    def _step_head_to_front(self, dt: float) -> None:
+        """While disengaged the head goes to the front at the head speed instead of holding the pose it was
+        found in (on the real robot that is the down stop), so the headset view and the first frames of the next
+        episode look ahead."""
+        max_step = self.config.head_speed_rad_s * dt
+        for key, front in zip(HEAD_KEYS, DEFAULT_HEAD_Q, strict=True):
+            self._target[key] = _step_toward(self._target[key], front, max_step)
 
     def _step_hands(self, frame: Any, dt: float) -> None:
         max_step = self.config.hand_blend_per_s * dt
@@ -576,10 +630,15 @@ class UnitreeG1XRTeleop(Teleoperator):
         active = self._engaged and frame.tracking
         if active:
             self._step_arms(frame, dt)
-            if self._head and "head" not in self._locked:
+            if self._head and "head" not in self._locked and self.config.head_hold is None:
                 self._step_head(frame, dt)
             if self.hand_spec is not None:
                 self._step_hands(frame, dt)
+        if self._head and "head" not in self._locked and self._synced_to_robot:
+            if self.config.head_hold is not None:
+                self._step_head_to_hold(dt)
+            elif not self._engaged:
+                self._step_head_to_front(dt)
 
         (lx, ly), (rx, ry) = frame.sticks["left"], frame.sticks["right"]
         # Vuer's stick y is negative pushed forward.
