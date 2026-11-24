@@ -349,6 +349,10 @@ class GrootConfig(PreTrainedConfig):
 
     # Training parameters
     optimizer_lr: float = 1e-4
+    # Learning rate for the trainable VLM backbone parameters (vision tower / LLM when tune_visual / tune_llm
+    # or tune_top_llm_layers unfreeze them). None = same as optimizer_lr. A full fine-tune usually wants the
+    # pretrained backbone moved ~10x slower than the freshly adapted action head.
+    optimizer_backbone_lr: float | None = None
     # Isaac-GR00T N1.7 fine-tunes with AdamW betas (0.9, 0.999).
     optimizer_betas: tuple[float, float] = (0.9, 0.999)
     optimizer_eps: float = 1e-8

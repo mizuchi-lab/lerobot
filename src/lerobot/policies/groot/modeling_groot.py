@@ -285,8 +285,26 @@ class GrootPolicy(PreTrainedPolicy):
         return policy
 
     def get_optim_params(self):  # type: ignore[override]
-        """Isaac-GR00T excludes biases and normalization parameters from weight decay."""
-        return self._build_weight_decay_parameter_groups(self)
+        """Isaac-GR00T excludes biases and normalization parameters from weight decay.
+
+        With `optimizer_backbone_lr` set, the trainable backbone parameters get their own groups at that lr.
+        """
+        groups = self._build_weight_decay_parameter_groups(self)
+        backbone_lr = self.config.optimizer_backbone_lr
+        if backbone_lr is None:
+            return groups
+        backbone_ids = {id(p) for p in self._groot_model.backbone.parameters()}
+        split: list[dict[str, object]] = []
+        for group in groups:
+            params = group["params"]
+            extra = {k: v for k, v in group.items() if k != "params"}
+            head = [p for p in params if id(p) not in backbone_ids]
+            backbone = [p for p in params if id(p) in backbone_ids]
+            if head:
+                split.append({"params": head, **extra})
+            if backbone:
+                split.append({"params": backbone, **extra, "lr": backbone_lr})
+        return split
 
     def _resolve_action_queue_steps(self) -> int:
         n_action_steps = int(self.config.n_action_steps)
