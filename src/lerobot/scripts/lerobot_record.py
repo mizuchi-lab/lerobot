@@ -642,7 +642,7 @@ def record(
         robot.connect()
         # Which code produced the data (sim/worlds revisions are known once the robot is connected). A resumed
         # dataset keeps only the latest session's file.
-        write_provenance(robot, dataset.root)
+        write_provenance(robot, dataset.root, teleop=teleop)
 
         listener, events = init_keyboard_listener()
 

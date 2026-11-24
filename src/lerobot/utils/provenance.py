@@ -32,10 +32,10 @@ def git_info(path: str | Path) -> dict[str, Any] | None:
     path = Path(path)
     cwd = path if path.is_dir() else path.parent
     try:
-        commit = subprocess.run(
+        commit = subprocess.run(  # nosec B607 - git from PATH on purpose
             ["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True, check=True, timeout=10
         ).stdout.strip()
-        status = subprocess.run(
+        status = subprocess.run(  # nosec B607
             ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=cwd,
             capture_output=True,
@@ -73,15 +73,20 @@ def lerobot_info() -> dict[str, Any]:
     return git_info(Path(lerobot.__file__).parent) or {"commit": None, "dirty": None}
 
 
-def write_provenance(robot: Any, root: str | Path) -> Path | None:
-    """Write `robot.provenance()` to `<root>/meta/provenance.json` (overwrites). No-op without the hook."""
+def write_provenance(robot: Any, root: str | Path, teleop: Any = None) -> Path | None:
+    """Write `robot.provenance()` to `<root>/meta/provenance.json` (overwrites), plus `teleop.provenance()` under
+    "teleop" when the teleoperator has that hook (e.g. its speed limits). No-op without the robot hook."""
     provenance = getattr(robot, "provenance", None)
     if not callable(provenance):
         return None
     out = Path(root) / PROVENANCE_FILE
     try:
+        info = dict(provenance())
+        teleop_provenance = getattr(teleop, "provenance", None)
+        if callable(teleop_provenance):
+            info["teleop"] = teleop_provenance()
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(provenance(), indent=2) + "\n")
+        out.write_text(json.dumps(info, indent=2) + "\n")
     except Exception as e:  # noqa: BLE001 - never block a recording over metadata
         logger.warning(f"Could not write {out}: {e}")
         return None

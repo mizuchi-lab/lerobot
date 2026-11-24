@@ -81,3 +81,19 @@ def test_write_provenance_writes_json_and_overwrites(tmp_path):
 def test_write_provenance_noop_without_hook(tmp_path):
     assert write_provenance(object(), tmp_path) is None
     assert not (tmp_path / "meta").exists()
+
+
+def test_write_provenance_adds_the_teleop_section(tmp_path):
+    class Robot:
+        def provenance(self):
+            return {"v": 1}
+
+    class Teleop:
+        def provenance(self):
+            return {"max_arm_speed_rad_s": 0.4}
+
+    out = write_provenance(Robot(), tmp_path, teleop=Teleop())
+    assert json.loads(out.read_text()) == {"v": 1, "teleop": {"max_arm_speed_rad_s": 0.4}}
+    # A teleop without the hook (or a list of teleops) adds nothing.
+    write_provenance(Robot(), tmp_path, teleop=[Teleop()])
+    assert json.loads(out.read_text()) == {"v": 1}
