@@ -57,10 +57,12 @@ TICKS_PER_TURN = 4096
 # the push so a stop is only pressed gently. Current_Limit is never written.
 HEAD_OPERATING_MODE = 5
 HEAD_GOAL_CURRENT = 75  # starts both joints from standstill (40 did not); 2026-11-10 sweeps
-# Hard stops minus 30 ticks, measured 2026-11-10 (yaw 1704..2861; pitch -553..678 worst case over yaw, 0 = front).
-# Front (yaw 2544, pitch 224) +- the box; the mount slipped +262 / +224 ticks after 2026-11-10 morning: re-run
-# jetson_relay/tests/head_range_find.py --calibrate if the stops move (front yaw = midpoint of the yaw stops).
-HEAD_BOX_TICKS: dict[str, tuple[int, int]] = {"kHeadYaw": (1996, 3093), "kHeadPitch": (-299, 872)}
+# Hard stops minus 30 ticks, worst case over yaw, in raw ticks. 2026-11-24 midday (the pitch horn slipped ~45 deg
+# during the first slow episode; head_range_find.py --calibrate --pitch-front -2151): yaw stops 2448..3546 (front =
+# midpoint 2997), pitch front raw -2151 (level camera frame), stops front -715..+649 worst case. Both horns slip
+# (pitch front 0, -973, -1662 on 2026-11-17, -2151 on 2026-11-24; yaw 2759 -> 2948 -> 2997): re-run the calibration
+# if the head is refused at start or the front looks off, and check the front (yaw too) with a camera frame.
+HEAD_BOX_TICKS: dict[str, tuple[int, int]] = {"kHeadYaw": (2478, 3516), "kHeadPitch": (-2836, -1532)}
 # Within this many ticks outside the box (pitch rests on its down stop at ~700) a joint still gets torque.
 HEAD_BOX_TOLERANCE = 250  # covers the head resting on its down stop with torque off (pitch ~813, 2026-11-10)
 
